@@ -214,13 +214,14 @@ model = model.eval()
 # make output directories
 output_root = os.path.join(args.output_path, config_name)
 image_path = os.path.join(output_root, 'images') # For final selected images + input
-intermediate_path = os.path.join(output_root, 'intermediate_views') # For saving best candidate views
 mesh_path = os.path.join(output_root, 'meshes')
 video_path = os.path.join(output_root, 'videos')
+# Intermediate path is now the parent for per-input intermediate folders
+intermediate_parent_path = os.path.join(output_root, 'intermediate_views')
 os.makedirs(image_path, exist_ok=True)
-os.makedirs(intermediate_path, exist_ok=True)
 os.makedirs(mesh_path, exist_ok=True)
 os.makedirs(video_path, exist_ok=True)
+os.makedirs(intermediate_parent_path, exist_ok=True) # Create the parent intermediate dir
 
 # process input files
 if os.path.isdir(args.input_path):
@@ -248,6 +249,11 @@ for idx, image_file in enumerate(input_files):
     name = os.path.basename(image_file).split('.')[0]
     print(f'[{idx+1}/{len(input_files)}] Processing {name} ...')
 
+    # Create specific intermediate directory for this input
+    current_intermediate_path = os.path.join(intermediate_parent_path, name)
+    os.makedirs(current_intermediate_path, exist_ok=True)
+    print(f"  Saving intermediate views to: {current_intermediate_path}")
+
     # remove background optionally
     print("  Preprocessing input image...")
     input_image = Image.open(image_file)
@@ -259,18 +265,19 @@ for idx, image_file in enumerate(input_files):
     # --- Candidate Generation Loop ---
     best_group_data = {
         "avg_score": -float('inf'), # Initialize lower for maximization
-        "images_pil": None,         # Store PIL images for saving
         "images_tensor": None,      # Store Tensor for reconstruction
         "gemini_scores": None,
         "laion_scores": None,
         "seed": -1
     }
+    candidate_intermediate_files = [] # Store filenames for this input's candidates
 
     print(f"  Generating and evaluating {args.num_candidates} candidate groups...")
     for i in range(args.num_candidates):
         print(f"    --- Candidate Group {i+1}/{args.num_candidates} ---")
         current_seed = random.randint(0, 2**32 - 1)
         generator = torch.Generator(device=device).manual_seed(current_seed)
+        output_image_pil = None # Reset in case of generation error
 
         # sampling - Generate all 6 views at once
         print(f"    Generating multiview images with seed: {current_seed}...")
@@ -283,7 +290,12 @@ for idx, image_file in enumerate(input_files):
             # output_image_pil is a 960x640 image with 6 views (3x2 grid)
         except Exception as e:
             print(f"    Error during image generation for group {i+1}: {e}")
-            continue # Skip to the next candidate group
+            # Attempt to save even if verification fails later, if generation succeeded partially
+            # continue # Skip to the next candidate group
+
+        if output_image_pil is None:
+             print(f"    Skipping candidate {i+1} due to generation failure.")
+             continue # Skip if generation failed entirely
 
         # Convert PIL image grid to tensor of individual images
         images_np = np.asarray(output_image_pil, dtype=np.float32) / 255.0
@@ -292,11 +304,10 @@ for idx, image_file in enumerate(input_files):
 
         # --- Verification ---
         avg_group_score = -1.0 # Default score if verification fails or is skipped
+        avg_laion_score = None # Default LAION score
         current_gemini_results = []
         current_laion_results = []
 
-        # Convert tensor back to list of PIL Images for verifiers
-        # Ensure images are in CPU memory before converting to PIL
         images_pil_list = [v2.functional.to_pil_image(img_t.cpu()) for img_t in images_tensor]
 
         # Apply Gemini Verifier
@@ -317,7 +328,7 @@ for idx, image_file in enumerate(input_files):
                 avg_group_score = -1 # Penalize groups that fail verification
                 current_gemini_results = []
 
-        # Apply LAION Aesthetic Verifier (Optional, but kept for info)
+        # Apply LAION Aesthetic Verifier
         if laion_verifier:
             print("    Applying LAION Aesthetic Verifier...")
             try:
@@ -331,16 +342,29 @@ for idx, image_file in enumerate(input_files):
                 print(f"    Error during LAION verification for group {i+1}: {e}")
                 current_laion_results = []
 
-        # --- Update Best Group ---
-        # If not using Gemini, the first candidate is the "best"
-        score_to_compare = avg_group_score if use_gemini else i # Use index 'i' to select first candidate if gemini off
+        # --- Save THIS candidate's intermediate image ---
+        # Construct filename with scores if available
+        gemini_score_str = f"{avg_group_score:.2f}" if avg_group_score != -1.0 else "N/A"
+        laion_score_str = f"{avg_laion_score:.2f}" if avg_laion_score is not None else "N/A"
+        intermediate_filename = os.path.join(
+            current_intermediate_path,
+            f'candidate_{i}_seed{current_seed}_gemini{gemini_score_str}_laion{laion_score_str}.png'
+        )
+        try:
+            output_image_pil.save(intermediate_filename)
+            print(f"    Saved candidate view grid to {intermediate_filename}")
+            candidate_intermediate_files.append(os.path.relpath(intermediate_filename, output_root)) # Store relative path for summary
+        except Exception as e:
+            print(f"    Error saving intermediate image for candidate {i+1}: {e}")
+        # --- End saving candidate ---
 
-        # Update if current score is better OR if it's the first candidate when not using Gemini
+
+        # --- Update Best Group ---
+        score_to_compare = avg_group_score if use_gemini else i
         if (use_gemini and score_to_compare > best_group_data["avg_score"]) or (not use_gemini and i == 0):
             print(f"    New best group found with score: {score_to_compare:.4f}")
             best_group_data["avg_score"] = score_to_compare
-            best_group_data["images_pil"] = output_image_pil # Save the grid PIL image
-            best_group_data["images_tensor"] = images_tensor # Save the tensor (6, C, H, W)
+            best_group_data["images_tensor"] = images_tensor
             best_group_data["gemini_scores"] = current_gemini_results
             best_group_data["laion_scores"] = current_laion_results
             best_group_data["seed"] = current_seed
@@ -349,17 +373,24 @@ for idx, image_file in enumerate(input_files):
     # --- Process Best Group ---
     if best_group_data["images_tensor"] is None:
         print(f"  No successful candidate groups generated or verified for {name}. Skipping reconstruction.")
+        # Still save summary data collected so far
+        run_result_data = {
+            "input_name": name,
+            "input_file": image_file,
+            "config": config_name,
+            "num_candidates": args.num_candidates,
+            "best_seed": best_group_data["seed"],
+            "best_gemini_avg_score": best_group_data["avg_score"] if use_gemini else None,
+            "best_laion_avg_score": avg_laion_score_best_group,
+            "gemini_prompt": args.gemini_prompt if use_gemini else None,
+            "representative_gemini_explanation": gemini_explanation if use_gemini else None,
+            "intermediate_view_files": candidate_intermediate_files, # Store list of all generated files
+            "processing_time_seconds": (datetime.now() - start_time).total_seconds()
+        }
+        all_run_results.append(run_result_data)
         continue # Skip to the next input image
 
     print(f"  Selected best group for {name} (Seed: {best_group_data['seed']}, Score: {best_group_data['avg_score']:.4f})")
-
-    # Save the best PIL image grid (intermediate output)
-    intermediate_filename = os.path.join(intermediate_path, f'{name}_seed{best_group_data["seed"]}_score{best_group_data["avg_score"]:.2f}.png')
-    try:
-        best_group_data["images_pil"].save(intermediate_filename)
-        print(f"  Best intermediate view grid saved to {intermediate_filename}")
-    except Exception as e:
-        print(f"  Error saving intermediate image: {e}")
 
     # Prepare data for Stage 2 (Reconstruction)
     outputs_for_stage2.append({
@@ -388,7 +419,7 @@ for idx, image_file in enumerate(input_files):
         "best_laion_avg_score": avg_laion_score_best_group,
         "gemini_prompt": args.gemini_prompt if use_gemini else None,
         "representative_gemini_explanation": gemini_explanation if use_gemini else None,
-        "intermediate_views_file": intermediate_filename,
+        "intermediate_view_files": candidate_intermediate_files, # Store list of all generated files
         "processing_time_seconds": (datetime.now() - start_time).total_seconds()
     }
     all_run_results.append(run_result_data)
