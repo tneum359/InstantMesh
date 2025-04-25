@@ -18,6 +18,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(SCRIPT_DIR)
 ROOT_DIR = os.path.dirname(PARENT_DIR) # This should be the root of Inference-Time-Scaling-for-3D-Diffusion
 sys.path.append(ROOT_DIR)
+print(f"--- DEBUG: Added {ROOT_DIR} to sys.path ---")
 # --- End sys.path modification ---
 
 # --- Added imports from scaling.py ---
