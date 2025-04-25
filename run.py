@@ -12,6 +12,14 @@ from tqdm import tqdm
 from huggingface_hub import hf_hub_download
 from diffusers import DiffusionPipeline, EulerAncestralDiscreteScheduler
 
+# --- Add parent directory to sys.path --- Added
+import sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(SCRIPT_DIR)
+ROOT_DIR = os.path.dirname(PARENT_DIR) # This should be the root of Inference-Time-Scaling-for-3D-Diffusion
+sys.path.append(ROOT_DIR)
+# --- End sys.path modification ---
+
 # --- Added imports from scaling.py ---
 import json
 from datetime import datetime
