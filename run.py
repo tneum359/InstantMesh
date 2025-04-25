@@ -15,10 +15,10 @@ from diffusers import DiffusionPipeline, EulerAncestralDiscreteScheduler
 # --- Add parent directory to sys.path --- Added
 import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PARENT_DIR = os.path.dirname(SCRIPT_DIR)
-ROOT_DIR = os.path.dirname(PARENT_DIR) # This should be the root of Inference-Time-Scaling-for-3D-Diffusion
-sys.path.append(ROOT_DIR)
-print(f"--- DEBUG: Added {ROOT_DIR} to sys.path ---")
+PARENT_DIR = os.path.dirname(SCRIPT_DIR) # This is the parent repo root
+# ROOT_DIR = os.path.dirname(PARENT_DIR) # Removed incorrect calculation
+sys.path.append(PARENT_DIR) # Changed from ROOT_DIR
+print(f"--- DEBUG: Added {PARENT_DIR} to sys.path ---") # Updated debug print
 # --- End sys.path modification ---
 
 # --- Added imports from scaling.py ---
