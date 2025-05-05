@@ -386,16 +386,35 @@ if __name__ == "__main__":
 
     # --- Final Path Checks and Directory Creation ---
     if args.input_path is None:
-        # This should only happen if not in Colab and no path provided
         parser.error("--input_path is required.")
 
+    # ----> ADDED DEBUG PRINTS <----
+    print(f"DEBUG: Final input path to check: {args.input_path}")
+    try:
+        exists = os.path.exists(args.input_path)
+        isdir = os.path.isdir(args.input_path)
+        print(f"DEBUG: os.path.exists result: {exists}")
+        print(f"DEBUG: os.path.isdir result: {isdir}")
+        if exists and not isdir:
+             print(f"DEBUG: Path exists but is not a directory.")
+        elif not exists:
+             print(f"DEBUG: Path does not exist according to os.path.exists.")
+             # Optional: Try listing parent directory content
+             parent_dir = os.path.dirname(args.input_path)
+             if os.path.exists(parent_dir):
+                  print(f"DEBUG: Parent directory ({parent_dir}) contents: {os.listdir(parent_dir)}")
+             else:
+                  print(f"DEBUG: Parent directory ({parent_dir}) also does not exist.")
+    except Exception as e:
+         print(f"DEBUG: Error during path check: {e}")
+    # ----> END DEBUG PRINTS <----
+
     # Check input path validity BEFORE proceeding (for both batch and single mode)
-    # This check now uses the potentially user-provided path directly
     is_input_dir = os.path.isdir(args.input_path)
     is_input_file = os.path.isfile(args.input_path)
 
     if args.batch_mode and not is_input_dir:
-        print(f"Error: Batch mode requires --input_path ('{args.input_path}') to be a valid directory.")
+        print(f"Error: Batch mode requires --input_path ('{args.input_path}') to be a valid directory (os.path.isdir failed).")
         exit(1)
     if not args.batch_mode and not is_input_file and not is_input_dir:
          # In single mode, if it's not a file, we check if it's a dir later
