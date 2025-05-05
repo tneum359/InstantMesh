@@ -287,6 +287,14 @@ rembg_session = None if args.no_rembg else rembg.new_session()
 
 outputs_for_stage2 = [] # Store data for the selected best views
 
+# Utility: Composite RGBA over white before converting to RGB
+def rgba_to_rgb_white(img):
+    if img.mode == 'RGBA':
+        background = Image.new('RGB', img.size, (255, 255, 255))
+        return Image.alpha_composite(background.convert('RGBA'), img).convert('RGB')
+    else:
+        return img.convert('RGB')
+
 for idx, image_file in enumerate(input_files):
     start_time = datetime.now()
     # Extract base name without extension (e.g., "image_01")
@@ -368,7 +376,7 @@ for idx, image_file in enumerate(input_files):
 
         # Convert cleaned PIL images back to tensor for reconstruction and saving
         to_tensor = v2.ToTensor()
-        images_tensor = torch.stack([to_tensor(img.convert('RGB')) for img in images_pil_list])
+        images_tensor = torch.stack([to_tensor(rgba_to_rgb_white(img)) for img in images_pil_list])
         images_tensor = images_tensor.unsqueeze(0)
         print("images_tensor shape:", images_tensor.shape, "dtype:", images_tensor.dtype, "min:", images_tensor.min().item(), "max:", images_tensor.max().item())
 
@@ -424,7 +432,7 @@ for idx, image_file in enumerate(input_files):
     print(f"  Selected best group for {name} (Seed: {best_group_data['seed']}, Score: {best_group_data['avg_score']:.4f})")
 
     # Save best intermediate view grid as a single image
-    img_tensors = [v2.ToTensor()(img.convert('RGB')) for img in best_group_data["images_pil"]]
+    img_tensors = [v2.ToTensor()(rgba_to_rgb_white(img)) for img in best_group_data["images_pil"]]
     grid = make_grid(torch.stack(img_tensors), nrow=2)
     grid_img = F.to_pil_image(grid)
     grid_img.save(intermediate_image_path)
