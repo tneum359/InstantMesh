@@ -388,7 +388,7 @@ if __name__ == "__main__":
     if args.input_path is None:
         parser.error("--input_path is required.")
 
-    # ----> DEBUG PRINTS remain for info <----
+    # ----> ADDED DEBUG PRINTS <----
     print(f"DEBUG: Final input path to check: {args.input_path}")
     try:
         exists = os.path.exists(args.input_path)
@@ -399,10 +399,23 @@ if __name__ == "__main__":
              print(f"DEBUG: Path exists but is not a directory.")
         elif not exists:
              print(f"DEBUG: Path does not exist according to os.path.exists.")
-             # Optional: Try listing parent directory content
              parent_dir = os.path.dirname(args.input_path)
              if os.path.exists(parent_dir):
-                  print(f"DEBUG: Parent directory ({parent_dir}) contents: {os.listdir(parent_dir)}")
+                  print(f"DEBUG: Parent directory ({parent_dir}) exists.")
+                  try:
+                      print(f"DEBUG: Parent directory contents: {os.listdir(parent_dir)}")
+                      # ---> TRY LISTING TARGET DIR IF PARENT EXISTS <--- 
+                      target_dir_name = os.path.basename(args.input_path)
+                      if target_dir_name in os.listdir(parent_dir):
+                           print(f"DEBUG: Target directory '{target_dir_name}' found in parent listing.")
+                           try:
+                                print(f"DEBUG: Attempting to list target directory '{args.input_path}' contents: {os.listdir(args.input_path)}")
+                           except Exception as list_err:
+                                print(f"DEBUG: Failed to list target directory '{args.input_path}': {list_err}")
+                      else:
+                           print(f"DEBUG: Target directory '{target_dir_name}' NOT found in parent listing.")
+                  except Exception as parent_list_err:
+                       print(f"DEBUG: Error listing parent directory '{parent_dir}': {parent_list_err}")
              else:
                   print(f"DEBUG: Parent directory ({parent_dir}) also does not exist.")
     except Exception as e:
