@@ -11,6 +11,8 @@ from einops import rearrange, repeat
 from tqdm import tqdm
 from huggingface_hub import hf_hub_download
 from diffusers import DiffusionPipeline, EulerAncestralDiscreteScheduler
+from torchvision.utils import make_grid
+import torchvision.transforms.functional as F
 
 # --- Add parent directory to sys.path --- Added
 import sys
@@ -421,12 +423,12 @@ for idx, image_file in enumerate(input_files):
 
     print(f"  Selected best group for {name} (Seed: {best_group_data['seed']}, Score: {best_group_data['avg_score']:.4f})")
 
-    # Save the best intermediate image grid
-    try:
-        best_group_data["images_pil"].save(intermediate_image_path)
-        print(f"  Saved best intermediate view grid to {intermediate_image_path}")
-    except Exception as e:
-        print(f"  Error saving best intermediate image: {e}")
+    # Save best intermediate view grid as a single image
+    img_tensors = [v2.ToTensor()(img.convert('RGB')) for img in best_group_data["images_pil"]]
+    grid = make_grid(torch.stack(img_tensors), nrow=2)
+    grid_img = F.to_pil_image(grid)
+    grid_img.save(intermediate_image_path)
+    print(f"  Saved best intermediate view grid to {intermediate_image_path}")
 
     # Save the best Gemini scores
     if use_gemini and best_group_data["gemini_scores"]:
