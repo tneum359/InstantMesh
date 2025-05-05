@@ -357,27 +357,38 @@ for idx, image_file in enumerate(input_files):
         images_tensor = torch.from_numpy(images_np).permute(2, 0, 1).contiguous().float()
         images_tensor = rearrange(images_tensor, 'c (n h) (m w) -> (n m) c h w', n=3, m=2)
 
-        avg_group_score = -1.0
-        current_gemini_results = []
-
+        # Convert tensor to list of PIL images for Gemini evaluation
         images_pil_list = [v2.functional.to_pil_image(img_t.cpu()) for img_t in images_tensor]
 
         if use_gemini and gemini_verifier:
-            print("    Applying Gemini Verifier...")
-            gemini_prompts = [args.gemini_prompt] * len(images_pil_list)
+            print("    Applying Gemini Verifier to evaluate multiview set...")
             try:
-                gemini_inputs = gemini_verifier.prepare_inputs(images=images_pil_list, prompts=gemini_prompts)
-                current_gemini_results = gemini_verifier.score(inputs=gemini_inputs)
-                group_overall_scores = [res.get("overall_score", {}).get("score", 0) for res in current_gemini_results]
-                if group_overall_scores:
-                    avg_group_score = np.mean(group_overall_scores)
+                # Prepare inputs for all 6 views at once
+                gemini_inputs = gemini_verifier.prepare_inputs(
+                    images=images_pil_list,
+                    prompts=[args.gemini_prompt] * 6  # Same prompt for all views
+                )
+                
+                # Get evaluation for the entire set
+                gemini_result = gemini_verifier.score(inputs=gemini_inputs)
+                
+                if gemini_result["success"]:
+                    result = gemini_result["result"]
+                    avg_group_score = result["overall_score"]
+                    print(f"    Gemini Evaluation Results:")
+                    print(f"      Aesthetic Quality: {result['aesthetic_quality']['score']:.2f}")
+                    print(f"      Visual Consistency: {result['visual_consistency']['score']:.2f}")
+                    print(f"      Reconstruction Potential: {result['reconstruction_potential']['score']:.2f}")
+                    print(f"      Overall Score: {avg_group_score:.2f}")
+                    print(f"      Assessment: {result['overall_assessment']}")
                 else:
-                    avg_group_score = 0
-                print(f"    Gemini Average Overall Score for Group: {avg_group_score:.4f}")
+                    print(f"    Error in Gemini evaluation: {gemini_result.get('error', 'Unknown error')}")
+                    avg_group_score = -1
+                    gemini_result = None
             except Exception as e:
                 print(f"    Error during Gemini verification for group {i+1}: {e}")
                 avg_group_score = -1
-                current_gemini_results = []
+                gemini_result = None
 
         # --- Update Best Group ---
         score_to_compare = avg_group_score if use_gemini else i
@@ -386,7 +397,7 @@ for idx, image_file in enumerate(input_files):
             best_group_data["avg_score"] = score_to_compare
             best_group_data["images_pil"] = output_image_pil # Save best PIL grid
             best_group_data["images_tensor"] = images_tensor
-            best_group_data["gemini_scores"] = current_gemini_results # Save best scores JSON
+            best_group_data["gemini_scores"] = gemini_result # Save best scores JSON
             best_group_data["seed"] = current_seed
     # --- End Candidate Generation Loop --
 
