@@ -419,14 +419,161 @@ if __name__ == "__main__":
     # --- Load models (Diffusion, UNet, Recon) --- 
     # (Keep this logic, assuming checkpoints might be relative or downloaded)
     # ... (Load Diffusion Pipeline) ...
-    # ... (Load Custom UNet) ...
+    pipeline = None
+    try:
+        print('Loading diffusion model ...')
+        pipeline = DiffusionPipeline.from_pretrained(
+            "sudo-ai/zero123plus-v1.2", 
+            custom_pipeline="sudo-ai/zero123plus-pipeline",
+            torch_dtype=torch.float16,
+        )
+        pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
+            pipeline.scheduler.config, timestep_spacing='trailing'
+        )
+        print('Loading custom white-background unet ...')
+        # Try finding UNet relative to script parent first, then config path, then download
+        unet_path_rel = os.path.join(PARENT_DIR, "ckpts", "diffusion_pytorch_model.bin") 
+        if os.path.exists(infer_config.unet_path):
+             unet_ckpt_path = infer_config.unet_path # Allow override from config
+             print(f"  Using UNet from config: {unet_ckpt_path}")
+        elif os.path.exists(unet_path_rel):
+             unet_ckpt_path = unet_path_rel
+             print(f"  Using local UNet: {unet_ckpt_path}")
+        else:
+            print(f"Custom UNet not found locally, downloading...")
+            unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
+        
+        state_dict = torch.load(unet_ckpt_path, map_location='cpu')
+        pipeline.unet.load_state_dict(state_dict, strict=True)
+        pipeline = pipeline.to(device)
+        print("Diffusion pipeline loaded.")
+    except Exception as e:
+        print(f"Error loading diffusion model: {e}")
+        traceback.print_exc()
+        exit(1)
+
     # ... (Initialize Gemini Verifier) ... 
+    gemini_verifier = None
+    gemini_available_flag = False
+    if args.num_candidates > 1:
+        if os.getenv("GEMINI_API_KEY"):
+            try:
+                # Ensure verifiers package is importable
+                from verifiers.gemini_verifier import GeminiVerifier 
+                print("Initializing Gemini Verifier...")
+                gemini_verifier = GeminiVerifier(gemini_prompt=args.gemini_prompt)
+                print("Gemini Verifier initialized successfully.")
+                gemini_available_flag = True
+            except ImportError:
+                 print("Warning: verifiers.gemini_verifier not found. Gemini scoring disabled.")
+            except Exception as e:
+                print(f"Error initializing Gemini Verifier: {e}. Gemini scoring disabled.")
+        else:
+            print("Warning: GEMINI_API_KEY not found. Gemini scoring disabled.")
+    else:
+        print("Gemini scoring disabled (num_candidates=1).")
+
     # ... (Load Reconstruction Model) ...
+    model = None
+    try:
+        print('Loading reconstruction model ...')
+        model = instantiate_from_config(model_config)
+        model_ckpt_filename = f"{config_name.replace('-', '_')}.ckpt"
+        # Try finding model relative to script parent first, then config path, then download
+        model_path_rel = os.path.join(PARENT_DIR, "ckpts", model_ckpt_filename) 
+        if hasattr(infer_config, 'model_path') and os.path.exists(infer_config.model_path):
+             model_ckpt_path = infer_config.model_path # Allow override
+             print(f"  Using Recon Model from config: {model_ckpt_path}")
+        elif os.path.exists(model_path_rel):
+             model_ckpt_path = model_path_rel
+             print(f"  Using local Recon Model: {model_ckpt_path}")
+        else:
+            print(f"Reconstruction model not found locally, downloading...")
+            model_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename=model_ckpt_filename, repo_type="model")
+        
+        state_dict = torch.load(model_ckpt_path, map_location='cpu')['state_dict']
+        state_dict = {k[14:]: v for k, v in state_dict.items() if k.startswith('lrm_generator.') and 'renderer' not in k}
+        model.load_state_dict(state_dict, strict=False)
+        model = model.to(device)
+        if IS_FLEXICUBES:
+            # Check if geometry needs initialization
+            if hasattr(model, 'init_flexicubes_geometry'): 
+                 model.init_flexicubes_geometry(device, fovy=30.0)
+            else:
+                 print("Warning: Model does not have init_flexicubes_geometry method.")
+        model = model.eval()
+        print("Reconstruction model loaded.")
+    except Exception as e:
+        print(f"Error loading reconstruction model: {e}")
+        traceback.print_exc()
+        exit(1)
+        
     # ... (Define Rembg Session) ...
+    rembg_session = None
+    if not args.no_rembg:
+        try:
+            rembg_session = rembg.new_session()
+            print("Rembg session created.")
+        except Exception as e:
+            print(f"Warning: Failed to create rembg session: {e}. Background removal disabled.")
+            args.no_rembg = True 
 
     # --- Batch or Single Image Processing ---
     # (Keep the existing logic that calls process_image based on args.batch_mode
     # and uses input_file_to_process_single for single mode)
-    # ... 
+    if args.batch_mode:
+        # Input path validity established above using is_effectively_input_dir
+        input_dir = args.input_path
+        # Use glob directly again here as it's more reliable with Drive mount issues
+        all_images = sorted(glob(os.path.join(input_dir, '*.png')))
+        if not all_images:
+             # Check again in case glob failed but subprocess didn't provide list
+             print(f"Error: No PNG images found in batch input directory via glob: {input_dir}. Subprocess check might have passed on empty dir.")
+             exit(1)
+        print(f"--- Starting Batch Mode: Found {len(all_images)} PNG images in {input_dir} ---")
+        
+        for img_path in tqdm(all_images, desc="Processing Batch"): 
+            img_name = os.path.splitext(os.path.basename(img_path))[0]
+            intermediate_subdir = os.path.join(args.output_intermediate_path, f'data_{img_name}')
+            output_subdir = os.path.join(args.output_3d_path, f'output_{img_name}')
+            os.makedirs(intermediate_subdir, exist_ok=True)
+            os.makedirs(output_subdir, exist_ok=True)
+            
+            # Pass camera creation logic inside or handle it here if needed
+            process_image(args, config, model_config, infer_config, device, 
+                          pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
+                          img_path, intermediate_subdir, output_subdir, is_gemini_pass=False)
+            
+            if gemini_available_flag:
+                 process_image(args, config, model_config, infer_config, device, 
+                               pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
+                               img_path, intermediate_subdir, output_subdir, is_gemini_pass=True)
+            else:
+                 print(f"  [{img_name}] Skipping Gemini pass (verifier not available/enabled).")
+
+        print("--- Batch processing complete. ---")
+
+    else: # Single Image Mode
+        # Use the file determined earlier
+        input_file_to_process = input_file_to_process_single 
+        if input_file_to_process is None:
+             print("Error: Could not determine single input file to process.")
+             exit(1)
+             
+        # Setup paths for single image mode
+        img_name = os.path.splitext(os.path.basename(input_file_to_process))[0]
+        intermediate_subdir = os.path.join(args.output_intermediate_path, f'data_{img_name}') 
+        output_subdir = os.path.join(args.output_3d_path, f'output_{img_name}') 
+        os.makedirs(intermediate_subdir, exist_ok=True)
+        os.makedirs(output_subdir, exist_ok=True)
+
+        should_run_gemini_single = args.num_candidates > 1 and gemini_available_flag
+        
+        process_image(args, config, model_config, infer_config, device, 
+                      pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
+                      input_file_to_process, intermediate_subdir, output_subdir, 
+                      is_gemini_pass=should_run_gemini_single)
+
+        print("--- Single image processing complete. ---")
 
     print("\n--- Script Finished ---")
