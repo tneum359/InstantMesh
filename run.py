@@ -366,6 +366,8 @@ for idx, image_file in enumerate(input_files):
 
         # Convert cleaned PIL images back to tensor for reconstruction and saving
         images_tensor = torch.stack([v2.functional.pil_to_tensor(img).float() / 255.0 for img in images_pil_list])
+        # Ensure correct shape for model: (1, 6, 3, H, W)
+        images_tensor = images_tensor.unsqueeze(0)
 
         if use_gemini and gemini_verifier:
             print("    Applying Gemini Verifier to evaluate multiview set...")
@@ -463,8 +465,8 @@ for idx, sample in enumerate(outputs_for_stage2):
     video_path_idx = sample['output_video_path'] # Use the path determined in Stage 1
     print(f'[{idx+1}/{len(outputs_for_stage2)}] Creating mesh for {name} -> {mesh_path_idx}')
 
-    # Images are already (6, C, H, W) tensor from Stage 1
-    images = sample['images'].unsqueeze(0).to(device) # Add batch dim -> (1, 6, C, H, W)
+    # Images are already (1, 6, 3, H, W) tensor from Stage 1
+    images = sample['images']
     images = v2.functional.resize(images, 320, interpolation=3, antialias=True).clamp(0, 1)
 
     # If --view 4 was specified, select the standard 4 views for reconstruction
