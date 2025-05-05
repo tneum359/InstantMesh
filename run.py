@@ -353,15 +353,13 @@ for idx, image_file in enumerate(input_files):
             print(f"    Skipping candidate {i+1} due to generation failure.")
             continue
 
-        images_np = np.asarray(output_image_pil, dtype=np.float32) / 255.0
-        images_tensor = torch.from_numpy(images_np).permute(2, 0, 1).contiguous().float()
-        images_tensor = rearrange(images_tensor, 'c (n h) (m w) -> (n m) c h w', n=3, m=2)
-
-        # Convert tensor to list of PIL images for Gemini evaluation
-        images_pil_list = [v2.functional.to_pil_image(img_t.cpu()) for img_t in images_tensor]
+        images_pil_list = [output_image_pil]
 
         # Remove background from each generated view using the same function as input preprocessing
         images_pil_list = [remove_background(img, rembg_session=rembg_session) for img in images_pil_list]
+
+        # Convert cleaned PIL images back to tensor for reconstruction and saving
+        images_tensor = torch.stack([v2.functional.pil_to_tensor(img).float() / 255.0 for img in images_pil_list])
 
         if use_gemini and gemini_verifier:
             print("    Applying Gemini Verifier to evaluate multiview set...")
