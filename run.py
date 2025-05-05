@@ -366,7 +366,7 @@ for idx, image_file in enumerate(input_files):
 
         # Convert cleaned PIL images back to tensor for reconstruction and saving
         to_tensor = v2.ToTensor()
-        images_tensor = torch.stack([to_tensor(img) for img in images_pil_list])
+        images_tensor = torch.stack([to_tensor(img.convert('RGB')) for img in images_pil_list])
         images_tensor = images_tensor.unsqueeze(0)
         print("images_tensor shape:", images_tensor.shape, "dtype:", images_tensor.dtype, "min:", images_tensor.min().item(), "max:", images_tensor.max().item())
 
