@@ -360,6 +360,9 @@ for idx, image_file in enumerate(input_files):
         # Convert tensor to list of PIL images for Gemini evaluation
         images_pil_list = [v2.functional.to_pil_image(img_t.cpu()) for img_t in images_tensor]
 
+        # Remove background from each generated view
+        images_pil_list = [rembg.remove(img, session=rembg_session) for img in images_pil_list]
+
         if use_gemini and gemini_verifier:
             print("    Applying Gemini Verifier to evaluate multiview set...")
             try:
