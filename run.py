@@ -274,14 +274,13 @@ def process_image(args, config, model_config, infer_config, device,
                 else:
                     print("  Warning: export_texmap requested but mesh output format unexpected. Saving with vertex colors.")
                     vertices, faces, vertex_colors = mesh_out # Fallback assuming vertex colors
-                    # --- Safely convert to NumPy --- 
-                    verts_np = np.asarray(vertices) if isinstance(vertices, memoryview) else vertices.data.cpu().numpy()
-                    faces_np = np.asarray(faces) if isinstance(faces, memoryview) else faces.data.cpu().numpy()
+                    # --- Safely convert ALL components to NumPy --- 
+                    verts_np = np.asarray(vertices) if isinstance(vertices, memoryview) else (vertices.data.cpu().numpy() if hasattr(vertices, 'data') else np.array(vertices))
+                    faces_np = np.asarray(faces) if isinstance(faces, memoryview) else (faces.data.cpu().numpy() if hasattr(faces, 'data') else np.array(faces))
                     
-                    # Handle vertex_colors specifically based on error
                     if isinstance(vertex_colors, memoryview):
                         colors_np = np.asarray(vertex_colors)
-                    elif isinstance(vertex_colors, torch.Tensor):
+                    elif hasattr(vertex_colors, 'data'): # Check for tensor-like
                         colors_np = vertex_colors.data.cpu().numpy()
                     elif isinstance(vertex_colors, np.ndarray):
                         colors_np = vertex_colors # Already numpy
@@ -295,14 +294,13 @@ def process_image(args, config, model_config, infer_config, device,
                 # Ensure mesh_out has vertex colors
                 if len(mesh_out) == 3:
                      vertices, faces, vertex_colors = mesh_out
-                     # --- Safely convert to NumPy --- 
-                     verts_np = np.asarray(vertices) if isinstance(vertices, memoryview) else vertices.data.cpu().numpy()
-                     faces_np = np.asarray(faces) if isinstance(faces, memoryview) else faces.data.cpu().numpy()
+                     # --- Safely convert ALL components to NumPy --- 
+                     verts_np = np.asarray(vertices) if isinstance(vertices, memoryview) else (vertices.data.cpu().numpy() if hasattr(vertices, 'data') else np.array(vertices))
+                     faces_np = np.asarray(faces) if isinstance(faces, memoryview) else (faces.data.cpu().numpy() if hasattr(faces, 'data') else np.array(faces))
                      
-                     # Handle vertex_colors specifically based on error
                      if isinstance(vertex_colors, memoryview):
                          colors_np = np.asarray(vertex_colors)
-                     elif isinstance(vertex_colors, torch.Tensor):
+                     elif hasattr(vertex_colors, 'data'): # Check for tensor-like
                          colors_np = vertex_colors.data.cpu().numpy()
                      elif isinstance(vertex_colors, np.ndarray):
                          colors_np = vertex_colors # Already numpy
@@ -316,8 +314,9 @@ def process_image(args, config, model_config, infer_config, device,
                      # Handle cases where only vertices and faces might be returned
                      if len(mesh_out) == 2:
                           vertices, faces = mesh_out
-                          verts_np = np.asarray(vertices) if isinstance(vertices, memoryview) else vertices.data.cpu().numpy()
-                          faces_np = np.asarray(faces) if isinstance(faces, memoryview) else faces.data.cpu().numpy()
+                          # --- Safely convert ALL components to NumPy --- 
+                          verts_np = np.asarray(vertices) if isinstance(vertices, memoryview) else (vertices.data.cpu().numpy() if hasattr(vertices, 'data') else np.array(vertices))
+                          faces_np = np.asarray(faces) if isinstance(faces, memoryview) else (faces.data.cpu().numpy() if hasattr(faces, 'data') else np.array(faces))
                           dummy_colors = np.ones_like(verts_np) * 0.5 # Gray
                           save_obj(verts_np, faces_np, dummy_colors, output_obj_path)
                      else:
