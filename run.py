@@ -156,6 +156,8 @@ parser.add_argument('--export_texmap', action='store_true', help='Export a mesh 
 parser.add_argument('--save_video', action='store_true', help='Save a circular-view video.')
 parser.add_argument('--num_candidates', type=int, default=1, help='Number of candidate multiview groups to generate and evaluate.')
 parser.add_argument('--gemini_prompt', type=str, default=None, help='Prompt for Gemini verifier (defaults to reading from verifiers/verifier_prompt.txt).')
+parser.add_argument('--gen_width', type=int, default=1024, help='Width for multiview generation')
+parser.add_argument('--gen_height', type=int, default=1536, help='Height for multiview generation')
 args = parser.parse_args()
 
 # --- Load default Gemini prompt from file if not provided --- Added
@@ -348,12 +350,14 @@ for idx, image_file in enumerate(input_files):
         generator = torch.Generator(device=device).manual_seed(current_seed)
         output_image_pil = None
 
-        print(f"    Generating multiview images with seed: {current_seed}...")
+        print(f"    Generating multiview images with seed: {current_seed} at resolution: {args.gen_width}x{args.gen_height}...")
         try:
             output_image_pil = pipeline(
                 input_image,
                 num_inference_steps=args.diffusion_steps,
                 generator=generator,
+                width=args.gen_width,
+                height=args.gen_height,
             ).images[0]
         except Exception as e:
             print(f"    Error during image generation for group {i+1}: {e}")
