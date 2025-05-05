@@ -353,7 +353,13 @@ for idx, image_file in enumerate(input_files):
             print(f"    Skipping candidate {i+1} due to generation failure.")
             continue
 
-        images_pil_list = [output_image_pil]
+        # Split the grid image into 6 separate views (assuming 3 rows x 2 columns)
+        w, h = output_image_pil.size
+        single_w, single_h = w // 2, h // 3
+        images_pil_list = [
+            output_image_pil.crop((col * single_w, row * single_h, (col + 1) * single_w, (row + 1) * single_h))
+            for row in range(3) for col in range(2)
+        ]
 
         # Remove background from each generated view using the same function as input preprocessing
         images_pil_list = [remove_background(img, rembg_session=rembg_session) for img in images_pil_list]
