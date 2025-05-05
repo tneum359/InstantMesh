@@ -5,76 +5,26 @@ import torch
 import rembg
 from PIL import Image
 from torchvision.transforms import v2
+import torchvision.transforms.functional as F
 from pytorch_lightning import seed_everything
 from omegaconf import OmegaConf
-from einops import rearrange, repeat
+from einops import rearrange
 from tqdm import tqdm
+from glob import glob
 from huggingface_hub import hf_hub_download
 from diffusers import DiffusionPipeline, EulerAncestralDiscreteScheduler
 from torchvision.utils import make_grid
-import torchvision.transforms.functional as F
-
-# --- Add parent directory to sys.path --- Added
-import sys
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PARENT_DIR = os.path.dirname(SCRIPT_DIR) # This is the parent repo root
-# ROOT_DIR = os.path.dirname(PARENT_DIR) # Removed incorrect calculation
-sys.path.append(PARENT_DIR) # Changed from ROOT_DIR
-print(f"--- DEBUG: Added {PARENT_DIR} to sys.path ---") # Updated debug print
-# --- End sys.path modification ---
-
-# --- Google Drive Mount --- Added
-try:
-    from google.colab import drive
-    print("Attempting to mount Google Drive...")
-    try:
-        drive.mount('/content/drive')
-        # Define Google Drive base paths
-        DRIVE_BASE_PATH = '/content/drive/MyDrive/final_project' # CHANGE THIS IF YOUR FOLDER IS DIFFERENT
-        DRIVE_INPUT_PATH = os.path.join(DRIVE_BASE_PATH, 'input_images')
-        DRIVE_INTERMEDIATE_PATH = os.path.join(DRIVE_BASE_PATH, 'intermediate_images')
-        DRIVE_OUTPUT_3D_PATH = os.path.join(DRIVE_BASE_PATH, 'output_3d')
-        print(f"Using Google Drive paths:\n  Input: {DRIVE_INPUT_PATH}\n  Intermediate: {DRIVE_INTERMEDIATE_PATH}\n  Output 3D: {DRIVE_OUTPUT_3D_PATH}")
-        # Ensure base output dirs exist
-        os.makedirs(DRIVE_INTERMEDIATE_PATH, exist_ok=True)
-        os.makedirs(DRIVE_OUTPUT_3D_PATH, exist_ok=True)
-        IS_COLAB = True
-    except Exception as e:
-        print(f"Warning: Failed to mount Google Drive: {e}")
-        print("Falling back to local paths.")
-        IS_COLAB = False
-        DRIVE_INPUT_PATH = None
-        DRIVE_INTERMEDIATE_PATH = 'outputs/intermediate_images'
-        DRIVE_OUTPUT_3D_PATH = 'outputs/output_3d'
-        os.makedirs(DRIVE_INTERMEDIATE_PATH, exist_ok=True)
-        os.makedirs(DRIVE_OUTPUT_3D_PATH, exist_ok=True)
-except ImportError:
-    print("Google Colab not detected. Using local paths.")
-    IS_COLAB = False
-    # Define fallback local paths
-    DRIVE_INPUT_PATH = None # Requires input_path argument
-    DRIVE_INTERMEDIATE_PATH = 'outputs/intermediate_images'
-    DRIVE_OUTPUT_3D_PATH = 'outputs/output_3d'
-    os.makedirs(DRIVE_INTERMEDIATE_PATH, exist_ok=True)
-    os.makedirs(DRIVE_OUTPUT_3D_PATH, exist_ok=True)
-
-# --- Added imports from scaling.py ---
 import json
-from datetime import datetime
 import random
-from dotenv import load_dotenv
-from io import BytesIO
-import base64
-import typing
-# Assuming verifier scripts are in a 'verifiers' subdirectory or python path
-try:
-    from verifiers.gemini_verifier import GeminiVerifier
-    print("Successfully imported verifiers.")
-except ImportError as e:
-    print(f"Warning: Failed to import verifiers ({e}). Make sure 'verifiers' directory is accessible from {PARENT_DIR}.")
-    GeminiVerifier = None
-# --- End added imports ---
+import traceback
 
+# --- Add parent directory to sys.path ---
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(SCRIPT_DIR)
+sys.path.append(PARENT_DIR)
+print(f"--- DEBUG: Added {PARENT_DIR} to sys.path ---")
+
+# --- Local utils ---
 from src.utils.train_util import instantiate_from_config
 from src.utils.camera_util import (
     FOV_to_intrinsics, 
@@ -82,25 +32,19 @@ from src.utils.camera_util import (
     get_circular_camera_poses,
 )
 from src.utils.mesh_util import save_obj, save_obj_with_mtl
-from src.utils.infer_util import remove_background, resize_foreground, save_video
+from src.utils.infer_util import remove_background, resize_foreground
 
+# --- Helper: Composite RGBA over white ---
+def rgba_to_rgb_white(img):
+    if img.mode == 'RGBA':
+        background = Image.new('RGB', img.size, (255, 255, 255))
+        # Alpha composite needs both images to be RGBA
+        return Image.alpha_composite(background.convert('RGBA'), img).convert('RGB') 
+    else:
+        return img.convert('RGB')
 
-# --- Helper function from scaling.py ---
-def convert_to_bytes(image: Image.Image, b64_encode=False) -> typing.Union[bytes, str]:
-    """Converts a PIL Image to bytes (PNG format for Gemini)."""
-    buffer = BytesIO()
-    image.save(buffer, format="PNG")
-    img_bytes = buffer.getvalue()
-    if b64_encode:
-        return base64.b64encode(img_bytes).decode("utf-8")
-    return img_bytes
-# --- End helper function ---
-
-
+# --- Helper: Camera function (assuming it's needed globally or passed) ---
 def get_render_cameras(batch_size=1, M=120, radius=4.0, elevation=20.0, is_flexicubes=False):
-    """
-    Get the rendering camera parameters.
-    """
     c2ws = get_circular_camera_poses(M=M, radius=radius, elevation=elevation)
     if is_flexicubes:
         cameras = torch.linalg.inv(c2ws)
@@ -112,524 +56,506 @@ def get_render_cameras(batch_size=1, M=120, radius=4.0, elevation=20.0, is_flexi
         cameras = cameras.unsqueeze(0).repeat(batch_size, 1, 1)
     return cameras
 
-
-def render_frames(model, planes, render_cameras, render_size=512, chunk_size=1, is_flexicubes=False):
-    """
-    Render frames from triplanes.
-    """
-    frames = []
-    for i in tqdm(range(0, render_cameras.shape[1], chunk_size)):
-        if is_flexicubes:
-            frame = model.forward_geometry(
-                planes,
-                render_cameras[:, i:i+chunk_size],
-                render_size=render_size,
-            )['img']
-        else:
-            frame = model.forward_synthesizer(
-                planes,
-                render_cameras[:, i:i+chunk_size],
-                render_size=render_size,
-            )['images_rgb']
-        frames.append(frame)
+# --- Core Processing Function ---
+def process_image(args, config, model_config, infer_config, device, 
+                  pipeline, model, gemini_verifier, rembg_session, input_cameras,
+                  input_image_path, intermediate_dir, output_dir, is_gemini_pass):
+    """Processes a single image, optionally using Gemini."""
+    img_name = os.path.splitext(os.path.basename(input_image_path))[0]
+    num_candidates = args.num_candidates if is_gemini_pass else 1 # Use arg for Gemini pass, 1 otherwise
+    use_gemini_this_pass = is_gemini_pass and (gemini_verifier is not None)
     
-    frames = torch.cat(frames, dim=1)[0]    # we suppose batch size is always 1
-    return frames
+    print(f'\n[{img_name}] Processing {"with Gemini" if is_gemini_pass else "no Gemini"} (from {input_image_path}) ...')
+    print(f"  Intermediate outputs -> {intermediate_dir}")
+    print(f"  Final 3D object -> {output_dir}")
 
+    # --- Define output paths for this specific input/pass ---
+    base_obj_name = f'generation_{img_name}' # Temporary name before rename
+    final_obj_name = 'obj_with_gemini.obj' if is_gemini_pass else 'obj_no_gemini.obj'
+    output_obj_path = os.path.join(output_dir, base_obj_name) # Path before renaming
+    final_output_obj_path = os.path.join(output_dir, final_obj_name)
 
-###############################################################################
-# Arguments.
-###############################################################################
-
-parser = argparse.ArgumentParser()
-parser.add_argument('config', type=str, help='Path to config file.')
-parser.add_argument('--input_path', type=str, default=DRIVE_INPUT_PATH, help='Path to input image directory (defaults to GDrive path if mounted).')
-parser.add_argument('--output_intermediate_path', type=str, default=DRIVE_INTERMEDIATE_PATH, help='Base directory for intermediate outputs (defaults to GDrive path if mounted).')
-parser.add_argument('--output_3d_path', type=str, default=DRIVE_OUTPUT_3D_PATH, help='Base directory for final 3D outputs (defaults to GDrive path if mounted).')
-parser.add_argument('--diffusion_steps', type=int, default=75, help='Denoising Sampling steps.')
-parser.add_argument('--seed', type=int, default=42, help='Random seed for sampling.')
-parser.add_argument('--scale', type=float, default=1.0, help='Scale of generated object.')
-parser.add_argument('--distance', type=float, default=4.5, help='Render distance.')
-parser.add_argument('--view', type=int, default=6, choices=[4, 6], help='Number of input views for reconstruction.')
-parser.add_argument('--no_rembg', action='store_true', help='Do not remove input background.')
-parser.add_argument('--export_texmap', action='store_true', help='Export a mesh with texture map.')
-parser.add_argument('--save_video', action='store_true', help='Save a circular-view video.')
-parser.add_argument('--num_candidates', type=int, default=1, help='Number of candidate multiview groups to generate and evaluate.')
-parser.add_argument('--gemini_prompt', type=str, default=None, help='Prompt for Gemini verifier (defaults to reading from verifiers/verifier_prompt.txt).')
-parser.add_argument('--gen_width', type=int, default=640, help='Width for multiview generation')
-parser.add_argument('--gen_height', type=int, default=960, help='Height for multiview generation')
-parser.add_argument('--batch_mode', action='store_true', help='If set, process all PNGs in input_path directory with both no-Gemini and Gemini passes.')
-args = parser.parse_args()
-
-# --- Load default Gemini prompt from file if not provided --- Added
-DEFAULT_GEMINI_PROMPT_FALLBACK = "Evaluate the quality of the generated 3D object views based on realism, detail, consistency, and adherence to the likely subject."
-if args.gemini_prompt is None:
-    prompt_file_path = os.path.join(PARENT_DIR, "verifiers", "verifier_prompt.txt")
-    print(f"--gemini_prompt not provided, attempting to load from {prompt_file_path}")
     try:
-        with open(prompt_file_path, 'r') as f:
-            args.gemini_prompt = f.read()
-        print("  Successfully loaded default prompt from file.")
-    except FileNotFoundError:
-        print(f"  Warning: Default prompt file not found at {prompt_file_path}. Using fallback default.")
-        args.gemini_prompt = DEFAULT_GEMINI_PROMPT_FALLBACK
-    except Exception as e:
-        print(f"  Warning: Error reading default prompt file {prompt_file_path}: {e}. Using fallback default.")
-        args.gemini_prompt = DEFAULT_GEMINI_PROMPT_FALLBACK
-else:
-    print(f"Using provided --gemini_prompt.")
-# --- End loading default prompt ---
-
-# Ensure input path is provided if not using default GDrive path
-if args.input_path is None and not IS_COLAB:
-    parser.error("--input_path is required when not running in Google Colab or GDrive not mounted.")
-# Ensure output paths are valid
-if not os.path.isdir(args.output_intermediate_path):
-    os.makedirs(args.output_intermediate_path, exist_ok=True)
-if not os.path.isdir(args.output_3d_path):
-    os.makedirs(args.output_3d_path, exist_ok=True)
-
-seed_everything(args.seed)
-
-###############################################################################
-# Stage 0: Configuration.
-###############################################################################
-
-config = OmegaConf.load(args.config)
-config_name = os.path.basename(args.config).replace('.yaml', '')
-model_config = config.model_config
-infer_config = config.infer_config
-
-IS_FLEXICUBES = True if config_name.startswith('instant-mesh') else False
-
-device = torch.device('cuda')
-
-# --- Load Gemini API Key ---
-load_dotenv()
-use_gemini = args.num_candidates > 1
-if use_gemini and not os.getenv("GEMINI_API_KEY"):
-    print("Warning: GEMINI_API_KEY not found in .env file. Gemini verification will be skipped.")
-    use_gemini = False
-if use_gemini and GeminiVerifier is None:
-    print("Warning: GeminiVerifier not available. Gemini verification will be skipped.")
-    use_gemini = False
-
-# load diffusion model
-print('Loading diffusion model ...')
-pipeline = DiffusionPipeline.from_pretrained(
-    "sudo-ai/zero123plus-v1.2", 
-    custom_pipeline="sudo-ai/zero123plus-pipeline",
-    torch_dtype=torch.float16,
-)
-pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-    pipeline.scheduler.config, timestep_spacing='trailing'
-)
-
-# load custom white-background UNet
-print('Loading custom white-background unet ...')
-if os.path.exists(infer_config.unet_path):
-    unet_ckpt_path = infer_config.unet_path
-else:
-    unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
-state_dict = torch.load(unet_ckpt_path, map_location='cpu')
-pipeline.unet.load_state_dict(state_dict, strict=True)
-
-pipeline = pipeline.to(device)
-
-# Initialize verifiers if needed
-gemini_verifier = None
-if use_gemini:
-    print("Initializing Gemini Verifier...")
-    try:
-        gemini_verifier = GeminiVerifier()
-        print("Gemini Verifier initialized successfully.")
-    except Exception as e:
-        print(f"Error initializing Gemini Verifier: {e}")
-        use_gemini = False
-
-# load reconstruction model
-print('Loading reconstruction model ...')
-model = instantiate_from_config(model_config)
-if os.path.exists(infer_config.model_path):
-    model_ckpt_path = infer_config.model_path
-else:
-    model_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename=f"{config_name.replace('-', '_')}.ckpt", repo_type="model")
-state_dict = torch.load(model_ckpt_path, map_location='cpu')['state_dict']
-state_dict = {k[14:]: v for k, v in state_dict.items() if k.startswith('lrm_generator.') and 'renderer' not in k} # Avoid loading renderer part if present
-model.load_state_dict(state_dict, strict=False) # Use strict=False if only loading LRM part
-
-model = model.to(device)
-if IS_FLEXICUBES:
-    model.init_flexicubes_geometry(device, fovy=30.0)
-model = model.eval()
-
-# process input files
-input_image_dir = args.input_path
-if not os.path.isdir(input_image_dir):
-    print(f"Error: Input path '{input_image_dir}' is not a valid directory.")
-    sys.exit(1)
-
-input_files = sorted([ # Sort for consistent naming (e.g., 01, 02)
-    os.path.join(input_image_dir, file)
-    for file in os.listdir(input_image_dir)
-    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))
-])
-
-if not input_files:
-    print(f"Error: No valid image files found in '{input_image_dir}'.")
-    sys.exit(1)
-
-print(f'Total number of input images found: {len(input_files)}')
-
-
-###############################################################################
-# Stage 1: Multiview generation and Selection.
-###############################################################################
-
-rembg_session = None if args.no_rembg else rembg.new_session()
-
-outputs_for_stage2 = [] # Store data for the selected best views
-
-# Utility: Composite RGBA over white before converting to RGB
-def rgba_to_rgb_white(img):
-    if img.mode == 'RGBA':
-        background = Image.new('RGB', img.size, (255, 255, 255))
-        return Image.alpha_composite(background.convert('RGBA'), img).convert('RGB')
-    else:
-        return img.convert('RGB')
-
-for idx, image_file in enumerate(input_files):
-    start_time = datetime.now()
-    # Extract base name without extension (e.g., "image_01")
-    name = os.path.splitext(os.path.basename(image_file))[0]
-    print(f'\n[{idx+1}/{len(input_files)}] Processing {name} (from {image_file}) ...')
-
-    # --- Define output paths for this specific input --- Added
-    intermediate_subdir = os.path.join(args.output_intermediate_path, name)
-    os.makedirs(intermediate_subdir, exist_ok=True)
-
-    intermediate_image_path = os.path.join(intermediate_subdir, f'intermediate_{name}.png')
-    gemini_txt_path = os.path.join(intermediate_subdir, f'gemini_output_{name}.txt')
-    output_obj_path = os.path.join(args.output_3d_path, f'generation_{name}.obj')
-    output_video_path = os.path.join(intermediate_subdir, f'video_{name}.mp4') # Video saved in intermediate dir
-
-    print(f"  Intermediate outputs will be saved to: {intermediate_subdir}")
-    print(f"  Final 3D object will be saved to: {output_obj_path}")
-    # --- End path definition ---
-
-    # remove background optionally
-    print("  Preprocessing input image...")
-    try:
-        input_image = Image.open(image_file)
-    except Exception as e:
-        print(f"  Error opening image {image_file}: {e}. Skipping.")
-        continue
-
-    if not args.no_rembg:
-        print("  Removing background...")
+        # --- Load input image ---
         try:
-            input_image = remove_background(input_image, rembg_session)
+            input_image = Image.open(input_image_path).convert('RGBA') # Ensure RGBA for consistency
         except Exception as e:
-            print(f"  Error removing background: {e}. Proceeding with original image.")
-        # Optional: Resize foreground (check if needed for zero123plus)
-        # input_image = resize_foreground(input_image, 0.85)
+            print(f"  Error opening image {input_image_path}: {e}. Skipping.")
+            return
 
+        # --- Preprocessing ---
+        print("  Preprocessing input image...")
+        if not args.no_rembg:
+            if rembg_session is None:
+                 print("  Warning: --no_rembg not set, but rembg_session is None. Skipping background removal.")
+            else:
+                 print("  Removing background...")
+                 try:
+                     input_image = remove_background(input_image, rembg_session)
+                 except Exception as e:
+                     print(f"  Error removing background: {e}. Proceeding with original image.")
+            # input_image = resize_foreground(input_image, 0.85) # Optional
 
-    # --- Candidate Generation Loop ---
-    best_group_data = {
-        "avg_score": -float('inf'),
-        "images_pil": None,        # Store PIL grid of BEST candidate
-        "images_tensor": None,     # Store Tensor of BEST candidate for reconstruction
-        "gemini_scores": None,     # Store Gemini JSON output for BEST candidate
-        "seed": -1
-    }
+        # --- Candidate Generation Loop ---
+        best_group_data = {
+            "avg_score": -float('inf'), "images_pil": None, "images_tensor": None,
+            "gemini_scores": None, "seed": -1
+        }
+        
+        print(f"  Generating and evaluating {num_candidates} candidate group(s)...")
+        for i in range(num_candidates):
+            print(f"    --- Candidate Group {i+1}/{num_candidates} ---")
+            current_seed = random.randint(0, 2**32 - 1)
+            generator = torch.Generator(device=device).manual_seed(current_seed)
+            output_image_pil_grid = None 
 
-    print(f"  Generating and evaluating {args.num_candidates} candidate groups...")
-    for i in range(args.num_candidates):
-        print(f"    --- Candidate Group {i+1}/{args.num_candidates} ---")
-        current_seed = random.randint(0, 2**32 - 1)
-        generator = torch.Generator(device=device).manual_seed(current_seed)
-        output_image_pil = None
-
-        print(f"    Generating multiview images with seed: {current_seed}...")
-        try:
-            output_image_pil = pipeline(
-                input_image,
-                num_inference_steps=args.diffusion_steps,
-                generator=generator,
-            ).images[0]
-        except Exception as e:
-            print(f"    Error during image generation for group {i+1}: {e}")
-            continue
-
-        if output_image_pil is None:
-            print(f"    Skipping candidate {i+1} due to generation failure.")
-            continue
-
-        # Split the grid image into 6 separate views (assuming 3 rows x 2 columns)
-        w, h = output_image_pil.size
-        single_w, single_h = w // 2, h // 3
-        images_pil_list = [
-            output_image_pil.crop((col * single_w, row * single_h, (col + 1) * single_w, (row + 1) * single_h))
-            for row in range(3) for col in range(2)
-        ]
-
-        # Remove background from each generated view using the same function as input preprocessing
-        images_pil_list = [remove_background(img, rembg_session=rembg_session) for img in images_pil_list]
-
-        # Convert cleaned PIL images back to tensor for reconstruction and saving
-        to_tensor = v2.ToTensor()
-        images_tensor = torch.stack([to_tensor(rgba_to_rgb_white(img)) for img in images_pil_list])
-        images_tensor = images_tensor.unsqueeze(0)
-        print("images_tensor shape:", images_tensor.shape, "dtype:", images_tensor.dtype, "min:", images_tensor.min().item(), "max:", images_tensor.max().item())
-
-        if use_gemini and gemini_verifier:
-            print("    Applying Gemini Verifier to evaluate multiview set...")
+            print(f"    Generating multiview images with seed: {current_seed}... (Res: {args.gen_width}x{args.gen_height}) ")
             try:
-                # Prepare inputs for all 6 views at once
-                gemini_inputs = gemini_verifier.prepare_inputs(
-                    images=images_pil_list,
-                    prompts=[args.gemini_prompt] * 6  # Same prompt for all views
-                )
-                
-                # Get evaluation for the entire set
-                gemini_result = gemini_verifier.score(inputs=gemini_inputs)
-                
-                if gemini_result["success"]:
-                    result = gemini_result["result"]
-                    avg_group_score = result["overall_score"]
-                    print(f"    Gemini Evaluation Results:")
-                    print(f"      Aesthetic Quality: {result['aesthetic_quality']['score']:.2f}")
-                    print(f"      Visual Consistency: {result['visual_consistency']['score']:.2f}")
-                    print(f"      Reconstruction Potential: {result['reconstruction_potential']['score']:.2f}")
-                    print(f"      Overall Score: {avg_group_score:.2f}")
-                    print(f"      Assessment: {result['overall_assessment']}")
-                else:
-                    error_msg = gemini_result.get('error', 'Unknown error') if isinstance(gemini_result, dict) else str(gemini_result)
-                    print(f"    Error in Gemini evaluation: {error_msg}")
-                    avg_group_score = -1
-                    gemini_result = None
+                # Generate the grid image
+                output_image_pil_grid = pipeline( 
+                    input_image.convert('RGB'), # Pipeline expects RGB
+                    num_inference_steps=args.diffusion_steps,
+                    generator=generator,
+                    width=args.gen_width, 
+                    height=args.gen_height,
+                ).images[0]
             except Exception as e:
-                print(f"    Error during Gemini verification for group {i+1}: {e}")
-                avg_group_score = -1
-                gemini_result = None
+                print(f"    Error during image generation for group {i+1}: {e}")
+                continue # Try next candidate
 
-        # --- Update Best Group ---
-        score_to_compare = avg_group_score if use_gemini else i
-        if (use_gemini and score_to_compare > best_group_data["avg_score"]) or (not use_gemini and i == 0):
-            print(f"    New best group found with score: {score_to_compare:.4f}")
-            best_group_data["avg_score"] = score_to_compare
-            best_group_data["images_pil"] = images_pil_list # Save best PIL grid
-            best_group_data["images_tensor"] = images_tensor
-            best_group_data["gemini_scores"] = gemini_result # Save best scores JSON
-            best_group_data["seed"] = current_seed
-    # --- End Candidate Generation Loop --
+            if output_image_pil_grid is None:
+                print(f"    Skipping candidate {i+1} due to generation failure.")
+                continue
+            
+            # --- Process Generated Views ---
+            try:
+                # Split the grid into 6 separate views
+                w, h = output_image_pil_grid.size
+                if w == 0 or h == 0: raise ValueError("Generated grid image has zero dimension")
+                single_w, single_h = w // 2, h // 3
+                if single_w == 0 or single_h == 0: raise ValueError("Calculated single view dimension is zero")
+                
+                images_pil_list = [
+                    output_image_pil_grid.crop((col * single_w, row * single_h, (col + 1) * single_w, (row + 1) * single_h))
+                    for row in range(3) for col in range(2)
+                ]
+                
+                # Remove background from each generated view (result is RGBA)
+                if rembg_session:
+                     images_pil_list_rgba = [remove_background(img, rembg_session=rembg_session) for img in images_pil_list]
+                else: # If no rembg, assume generated has background we want to keep (or convert to white later)
+                     images_pil_list_rgba = [img.convert('RGBA') for img in images_pil_list]
 
+                # Convert cleaned PIL images (RGBA) to RGB on white background, then to tensor
+                to_tensor = v2.ToTensor()
+                images_rgb_list = [rgba_to_rgb_white(img) for img in images_pil_list_rgba]
+                images_tensor = torch.stack([to_tensor(img) for img in images_rgb_list]) 
+                images_tensor = images_tensor.unsqueeze(0) # Add batch dim -> (1, 6, 3, H, W)
+                print("    Processed images_tensor shape:", images_tensor.shape, "dtype:", images_tensor.dtype, "range:", images_tensor.min().item(), images_tensor.max().item())
+            
+            except Exception as e:
+                 print(f"    Error processing generated views for group {i+1}: {e}")
+                 traceback.print_exc()
+                 continue # Try next candidate
 
-    # --- Process and Save Best Group's Outputs --- Modified
-    if best_group_data["images_tensor"] is None:
-        print(f"  No successful candidate groups generated or verified for {name}. Skipping reconstruction.")
-        # Optional: Log skipped files
-        continue
+            # --- Gemini Evaluation (if applicable) ---
+            avg_group_score = i # Default score if no Gemini
+            gemini_result_data = None
+            if use_gemini_this_pass:
+                print("    Applying Gemini Verifier...")
+                try:
+                    # Gemini needs RGBA or RGB? Prepare inputs expects list of PIL
+                    # Pass the RGBA list for evaluation if Gemini handles it, otherwise RGB list
+                    gemini_inputs = gemini_verifier.prepare_inputs(
+                        images=images_pil_list_rgba, # Pass RGBA list for evaluation
+                        prompts=[args.gemini_prompt] * 6
+                    )
+                    gemini_result = gemini_verifier.score(inputs=gemini_inputs)
+                    if gemini_result["success"]:
+                        gemini_result_data = gemini_result["result"]
+                        avg_group_score = gemini_result_data.get("overall_score", -1) # Handle missing score
+                        print(f"    Gemini Score: {avg_group_score:.2f}")
+                    else:
+                        print(f"    Gemini Eval Error: {gemini_result.get('error', 'Unknown')}")
+                        avg_group_score = -1 
+                        gemini_result_data = None
+                except Exception as e:
+                    print(f"    Gemini Verification Error: {e}")
+                    traceback.print_exc()
+                    avg_group_score = -1
+                    gemini_result_data = None
 
-    print(f"  Selected best group for {name} (Seed: {best_group_data['seed']}, Score: {best_group_data['avg_score']:.4f})")
+            # --- Update Best Group ---
+            score_to_compare = avg_group_score
+            # Update if score is better, OR if it's the first candidate in a no-Gemini pass
+            if (score_to_compare > best_group_data["avg_score"]) or (num_candidates == 1 and i == 0): 
+                print(f"    New best group found (Score: {score_to_compare:.4f}) Seed: {current_seed}")
+                best_group_data["avg_score"] = score_to_compare
+                best_group_data["images_pil"] = images_pil_list_rgba # Store the list of RGBA PIL images
+                best_group_data["images_tensor"] = images_tensor # Store the (1, 6, 3, H, W) RGB tensor
+                best_group_data["gemini_scores"] = gemini_result_data
+                best_group_data["seed"] = current_seed
+        # --- End Candidate Loop ---
 
-    # Save best intermediate view grid as a single image
-    img_tensors = [v2.ToTensor()(rgba_to_rgb_white(img)) for img in best_group_data["images_pil"]]
-    grid = make_grid(torch.stack(img_tensors), nrow=2)
-    grid_img = F.to_pil_image(grid)
-    grid_img.save(intermediate_image_path)
-    print(f"  Saved best intermediate view grid to {intermediate_image_path}")
+        if best_group_data["images_tensor"] is None:
+             print(f"  Failed to generate ANY valid candidates for {img_name}. Skipping reconstruction.")
+             return # Skip reconstruction for this image
 
-    # Save the best Gemini scores
-    if use_gemini and best_group_data["gemini_scores"]:
-        try:
-            with open(gemini_txt_path, 'w') as f:
-                json.dump(best_group_data["gemini_scores"], f, indent=4)
-            print(f"  Saved Gemini output to {gemini_txt_path}")
-        except Exception as e:
-            print(f"  Error saving Gemini output: {e}")
-    elif use_gemini:
-        print(f"  Skipping Gemini output save (no scores available or Gemini disabled).")
+        print(f"  Selected best group for {img_name} (Seed: {best_group_data['seed']}, Score: {best_group_data['avg_score']:.4f})")
 
+        # --- Save Intermediate Outputs (only if Gemini pass and data exists) ---
+        if is_gemini_pass and best_group_data["images_pil"]:
+            intermediate_image_path = os.path.join(intermediate_dir, f'intermediate_{img_name}.png')
+            gemini_txt_path = os.path.join(intermediate_dir, f'gemini_output_{img_name}.txt')
+            
+            # Save intermediate grid image (composite on white)
+            try:
+                # Use the stored RGBA images and convert to RGB on white for saving grid
+                img_tensors_rgb = [v2.ToTensor()(rgba_to_rgb_white(img)) for img in best_group_data["images_pil"]]
+                if not img_tensors_rgb: raise ValueError("No images to create grid")
+                grid = make_grid(torch.stack(img_tensors_rgb), nrow=2)
+                grid_img = F.to_pil_image(grid)
+                grid_img.save(intermediate_image_path)
+                print(f"  Saved intermediate grid to {intermediate_image_path}")
+            except Exception as e:
+                print(f"  Error saving intermediate image: {e}")
+                traceback.print_exc()
 
-    # Prepare data for Stage 2 (Reconstruction) - Pass the determined OBJ path
-    outputs_for_stage2.append({
-        'name': name,
-        'images': best_group_data["images_tensor"],
-        'output_obj_path': output_obj_path, # Pass the target save path
-        'output_video_path': output_video_path # Pass video path too
-    })
+            # Save Gemini scores
+            if best_group_data["gemini_scores"]:
+                try:
+                    with open(gemini_txt_path, 'w') as f:
+                        json.dump(best_group_data["gemini_scores"], f, indent=4)
+                    print(f"  Saved Gemini output to {gemini_txt_path}")
+                except Exception as e:
+                    print(f"  Error saving Gemini output: {e}")
+            else:
+                 print(f"  Skipping Gemini output save (no scores).")
 
+        # --- Stage 2: Reconstruction ---
+        print(f"  Starting reconstruction...")
+        images_for_recon = best_group_data['images_tensor'].to(device) # Use the selected tensor (1, 6, 3, H, W)
+        images_for_recon = v2.functional.resize(images_for_recon, 320, interpolation=3, antialias=True).clamp(0, 1)
 
-###############################################################################
-# Stage 2: Reconstruction.
-###############################################################################
+        # --- Camera Selection ---
+        # Create cameras ONCE outside the loop, select here
+        base_input_cameras = get_zero123plus_input_cameras(batch_size=1, radius=4.0*args.scale)
+        current_input_cameras = base_input_cameras # Start with all 6
+        if args.view == 4:
+            print("  Selecting 4 views for reconstruction...")
+            indices = torch.tensor([0, 2, 4, 5]).long() # Standard 4 views
+            images_for_recon = images_for_recon[:, indices]
+            current_input_cameras = base_input_cameras[:, indices] # Select corresponding cameras
+        current_input_cameras = current_input_cameras.to(device) # Move selected cameras to device
 
-print(f"\n--- Starting Stage 2: Reconstruction for {len(outputs_for_stage2)} selected inputs ---")
-
-# Get input cameras for the reconstruction model (likely expects 6 views)
-# Adjust radius based on args.scale if necessary
-input_cameras = get_zero123plus_input_cameras(batch_size=1, radius=4.0*args.scale).to(device) # Uses 4.0 radius by default
-chunk_size = 20 if IS_FLEXICUBES else 1
-
-for idx, sample in enumerate(outputs_for_stage2):
-    name = sample['name']
-    mesh_path_idx = sample['output_obj_path'] # Use the path determined in Stage 1
-    video_path_idx = sample['output_video_path'] # Use the path determined in Stage 1
-    print(f'[{idx+1}/{len(outputs_for_stage2)}] Creating mesh for {name} -> {mesh_path_idx}')
-
-    # Images are already (1, 6, 3, H, W) tensor from Stage 1
-    images = sample['images']
-    images = v2.functional.resize(images, 320, interpolation=3, antialias=True).clamp(0, 1)
-
-    # If --view 4 was specified, select the standard 4 views for reconstruction
-    # Note: Stage 1 generated 6 views regardless, we select here for reconstruction
-    current_input_cameras = input_cameras
-    if args.view == 4:
-        print("  Selecting 4 views for reconstruction...")
-        indices = torch.tensor([0, 2, 4, 5]).long() # Standard 4 views indices for Zero123++
-        images = images[:, indices]
-        current_input_cameras = input_cameras[:, indices] # Select corresponding cameras
-
-    with torch.no_grad():
-        # get triplane
-        print("  Generating triplanes...")
-        # Ensure model's forward_planes expects (B, N, C, H, W) and camera format (B, N, CamDim)
-        planes = model.forward_planes(images, current_input_cameras)
-
-        # get mesh
-        print("  Extracting mesh...")
-        try:
+        # --- Mesh Extraction ---
+        with torch.no_grad():
+            print("  Generating triplanes...")
+            # Ensure model and cameras are on the correct device
+            planes = model.to(device).forward_planes(images_for_recon, current_input_cameras)
+            print("  Extracting mesh...")
             mesh_out = model.extract_mesh(
                 planes,
                 use_texture_map=args.export_texmap,
                 **infer_config,
             )
-        except TypeError as te:
-             # Handle potential API changes in extract_mesh, e.g., unexpected kwargs
-             print(f"  Warning: TypeError during mesh extraction: {te}. Trying without infer_config...")
-             try:
-                mesh_out = model.extract_mesh(planes, use_texture_map=args.export_texmap)
-             except Exception as e_fallback:
-                 print(f"  Error during fallback mesh extraction: {e_fallback}. Skipping mesh saving.")
-                 continue # Skip to video rendering or next sample
+            print(f"  Saving mesh to {output_obj_path} (temp name)... ")
+            if args.export_texmap:
+                # Check if mesh_out has the expected components
+                if len(mesh_out) == 5:
+                    vertices, faces, uvs, mesh_tex_idx, tex_map = mesh_out
+                    save_obj_with_mtl(
+                        vertices.data.cpu().numpy(), uvs.data.cpu().numpy(), faces.data.cpu().numpy(),
+                        mesh_tex_idx.data.cpu().numpy(), tex_map.permute(1, 2, 0).data.cpu().numpy(),
+                        output_obj_path
+                    )
+                else:
+                    print("  Warning: export_texmap requested but mesh output format unexpected. Saving with vertex colors.")
+                    vertices, faces, vertex_colors = mesh_out # Fallback assuming vertex colors
+                    save_obj(vertices.data.cpu().numpy(), faces.data.cpu().numpy(), vertex_colors.data.cpu().numpy(), output_obj_path)
 
+            else:
+                # Ensure mesh_out has vertex colors
+                if len(mesh_out) == 3:
+                     vertices, faces, vertex_colors = mesh_out
+                     save_obj(vertices.data.cpu().numpy(), faces.data.cpu().numpy(), vertex_colors.data.cpu().numpy(), output_obj_path)
+                else:
+                     print("  Warning: Vertex colors expected but mesh output format unexpected. Saving without colors.")
+                     vertices, faces = mesh_out # Fallback assuming only verts/faces
+                     # Need a dummy color array or modify save_obj
+                     dummy_colors = np.ones_like(vertices.data.cpu().numpy()) * 0.5 # Gray
+                     save_obj(vertices.data.cpu().numpy(), faces.data.cpu().numpy(), dummy_colors, output_obj_path)
 
-        print(f"  Saving mesh to {mesh_path_idx}...")
-        if args.export_texmap:
-            try:
-                vertices, faces, uvs, mesh_tex_idx, tex_map = mesh_out
-                save_obj_with_mtl(
-                    vertices.data.cpu().numpy(),
-                    uvs.data.cpu().numpy(),
-                    faces.data.cpu().numpy(),
-                    mesh_tex_idx.data.cpu().numpy(),
-                    tex_map.permute(1, 2, 0).data.cpu().numpy(),
-                    mesh_path_idx,
-                )
-            except Exception as e_save:
-                print(f"  Error saving mesh with texture map: {e_save}")
+            
+            # --- Rename the saved OBJ ---
+            if os.path.exists(output_obj_path):
+                 try:
+                     # Ensure target path doesn't exist (optional, os.rename might overwrite)
+                     if os.path.exists(final_output_obj_path):
+                          print(f"  Warning: Overwriting existing file {final_output_obj_path}")
+                          os.remove(final_output_obj_path)
+                     os.rename(output_obj_path, final_output_obj_path)
+                     print(f"  Mesh saved to {final_output_obj_path}")
+                 except Exception as e:
+                      print(f"  Error renaming {output_obj_path} to {final_output_obj_path}: {e}")
+            else:
+                 print(f"  Warning: Mesh file {output_obj_path} not found after saving.")
+
+    except Exception as e:
+        print(f"\n !!! UNHANDLED ERROR processing {img_name} ({'Gemini pass' if is_gemini_pass else 'No Gemini pass'}) !!!")
+        print(f"Error: {e}")
+        traceback.print_exc()
+
+# --- Main Execution Logic ---
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('config', type=str, help='Path to config file.')
+    parser.add_argument('--input_path', type=str, default=None, help='Path to input image or directory (required if not in Colab/Drive).')
+    parser.add_argument('--output_intermediate_path', type=str, default='outputs/intermediate_images', help='Base directory for intermediate outputs.')
+    parser.add_argument('--output_3d_path', type=str, default='outputs/output_3d', help='Base directory for final 3D outputs.')
+    parser.add_argument('--diffusion_steps', type=int, default=75, help='Denoising Sampling steps.')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for sampling.')
+    parser.add_argument('--scale', type=float, default=1.0, help='Scale of generated object.')
+    parser.add_argument('--distance', type=float, default=4.5, help='Render distance.')
+    parser.add_argument('--view', type=int, default=6, choices=[4, 6], help='Number of views for reconstruction.')
+    parser.add_argument('--no_rembg', action='store_true', help='Do not remove input background.')
+    parser.add_argument('--export_texmap', action='store_true', help='Export a mesh with texture map.')
+    parser.add_argument('--save_video', action='store_true', help='Save a circular-view video (Not fully supported in batch mode).')
+    parser.add_argument('--num_candidates', type=int, default=1, help='Number of candidate groups for Gemini scoring (if > 1).')
+    parser.add_argument('--gemini_prompt', type=str, default=None, help='Prompt for Gemini verifier.')
+    parser.add_argument('--gen_width', type=int, default=640, help='Width for multiview generation.')
+    parser.add_argument('--gen_height', type=int, default=960, help='Height for multiview generation.')
+    parser.add_argument('--batch_mode', action='store_true', help='Process all PNGs in input_path directory.')
+    args = parser.parse_args()
+
+    # --- Load models and setup ---
+    print("--- Initializing Models and Environment ---")
+    seed_everything(args.seed)
+    try:
+        config = OmegaConf.load(args.config)
+        config_name = os.path.basename(args.config).replace('.yaml', '')
+        model_config = config.model_config
+        infer_config = config.infer_config
+    except Exception as e:
+        print(f"Error loading config file {args.config}: {e}")
+        exit(1)
+        
+    IS_FLEXICUBES = True if config_name.startswith('instant-mesh') else False
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    # --- Google Drive Mount & Path Handling ---
+    IS_COLAB = 'google.colab' in sys.modules
+    DRIVE_BASE_PATH = None
+    if IS_COLAB:
+        try:
+            from google.colab import drive
+            print("Attempting to mount Google Drive...")
+            drive.mount('/content/drive')
+            # Assume base path unless overridden by user args
+            potential_drive_base = '/content/drive/MyDrive/final_project' # Adjust if needed
+            if os.path.isdir(potential_drive_base):
+                 DRIVE_BASE_PATH = potential_drive_base
+                 print(f"Google Drive mounted. Default base path: {DRIVE_BASE_PATH}")
+                 # Set default args if they weren't provided
+                 if args.input_path is None: args.input_path = os.path.join(DRIVE_BASE_PATH, 'input_images')
+                 if args.output_intermediate_path == 'outputs/intermediate_images': args.output_intermediate_path = os.path.join(DRIVE_BASE_PATH, 'intermediate_images')
+                 if args.output_3d_path == 'outputs/output_3d': args.output_3d_path = os.path.join(DRIVE_BASE_PATH, 'output_3d')
+            else:
+                 print(f"Warning: Drive mounted, but default base path {potential_drive_base} not found.")
+                 IS_COLAB = False # Treat as local if base path missing
+        except Exception as e:
+            print(f"Warning: Failed to mount Google Drive: {e}. Falling back to local paths.")
+            IS_COLAB = False
+
+    if not IS_COLAB:
+        print("Using local paths (or Drive mount failed/path invalid).")
+        # Require input path if not using Colab/Drive defaults
+        if args.input_path is None:
+            parser.error("--input_path is required when not using Colab/Drive or if Drive mount failed.")
+    
+    # Ensure base output dirs exist (local or Drive)
+    try:
+         os.makedirs(args.output_intermediate_path, exist_ok=True)
+         os.makedirs(args.output_3d_path, exist_ok=True)
+         print(f"Intermediate output base: {args.output_intermediate_path}")
+         print(f"3D output base: {args.output_3d_path}")
+    except Exception as e:
+         print(f"Error creating output directories: {e}")
+         exit(1)
+
+    # --- Load Gemini Prompt ---
+    DEFAULT_GEMINI_PROMPT_FALLBACK = "Evaluate multiview images for 3D reconstruction."
+    if args.gemini_prompt is None:
+        prompt_file_path = os.path.join(PARENT_DIR, "verifiers", "verifier_prompt.txt")
+        print(f"Attempting to load Gemini prompt from {prompt_file_path}")
+        try:
+            with open(prompt_file_path, 'r') as f:
+                args.gemini_prompt = f.read()
+            print("  Successfully loaded default prompt from file.")
+        except Exception as e:
+            print(f"  Warning: Error reading prompt file ({e}). Using fallback.")
+            args.gemini_prompt = DEFAULT_GEMINI_PROMPT_FALLBACK
+    else:
+        print("Using provided --gemini_prompt.")
+
+    # --- Load diffusion model ---
+    pipeline = None
+    try:
+        print('Loading diffusion model ...')
+        pipeline = DiffusionPipeline.from_pretrained(
+            "sudo-ai/zero123plus-v1.2", 
+            custom_pipeline="sudo-ai/zero123plus-pipeline",
+            torch_dtype=torch.float16,
+        )
+        pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
+            pipeline.scheduler.config, timestep_spacing='trailing'
+        )
+        print('Loading custom white-background unet ...')
+        unet_path = os.path.join(PARENT_DIR, "ckpts", "diffusion_pytorch_model.bin") # More robust path
+        if os.path.exists(infer_config.unet_path):
+             unet_ckpt_path = infer_config.unet_path # Allow override from config
+        elif os.path.exists(unet_path):
+             unet_ckpt_path = unet_path
         else:
+            print(f"Custom UNet not found locally ({unet_path}), downloading...")
+            unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
+        
+        state_dict = torch.load(unet_ckpt_path, map_location='cpu')
+        pipeline.unet.load_state_dict(state_dict, strict=True)
+        pipeline = pipeline.to(device)
+        print("Diffusion pipeline loaded.")
+    except Exception as e:
+        print(f"Error loading diffusion model: {e}")
+        exit(1)
+
+    # --- Initialize Gemini Verifier ---
+    gemini_verifier = None
+    gemini_available_flag = False
+    if args.num_candidates > 1:
+        if os.getenv("GEMINI_API_KEY"):
             try:
-                # Assuming output is (vertices, faces, vertex_colors) for non-texmap case
-                vertices, faces, vertex_colors = mesh_out
-                save_obj(vertices, faces, vertex_colors, mesh_path_idx)
-            except Exception as e_save:
-                 print(f"  Error saving mesh with vertex colors: {e_save}")
-        print(f"  Mesh saved to {mesh_path_idx}")
+                from verifiers.gemini_verifier import GeminiVerifier
+                print("Initializing Gemini Verifier...")
+                gemini_verifier = GeminiVerifier(gemini_prompt=args.gemini_prompt)
+                print("Gemini Verifier initialized successfully.")
+                gemini_available_flag = True
+            except ImportError:
+                 print("Warning: GeminiVerifier script not found. Gemini scoring disabled.")
+            except Exception as e:
+                print(f"Error initializing Gemini Verifier: {e}. Gemini scoring disabled.")
+        else:
+            print("Warning: GEMINI_API_KEY not found. Gemini scoring disabled.")
+    else:
+        print("Gemini scoring disabled (num_candidates=1).")
 
-        # get video
-        if args.save_video:
-            print("  Rendering video...")
-            render_size = infer_config.get('render_resolution', 512)
+    # --- Load reconstruction model ---
+    model = None
+    try:
+        print('Loading reconstruction model ...')
+        model = instantiate_from_config(model_config)
+        model_ckpt_filename = f"{config_name.replace('-', '_')}.ckpt"
+        model_path = os.path.join(PARENT_DIR, "ckpts", model_ckpt_filename)
+        if os.path.exists(infer_config.model_path):
+             model_ckpt_path = infer_config.model_path # Allow override
+        elif os.path.exists(model_path):
+             model_ckpt_path = model_path
+        else:
+            print(f"Reconstruction model not found locally ({model_path}), downloading...")
+            model_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename=model_ckpt_filename, repo_type="model")
+        
+        state_dict = torch.load(model_ckpt_path, map_location='cpu')['state_dict']
+        state_dict = {k[14:]: v for k, v in state_dict.items() if k.startswith('lrm_generator.') and 'renderer' not in k}
+        model.load_state_dict(state_dict, strict=False)
+        model = model.to(device)
+        if IS_FLEXICUBES:
+            model.init_flexicubes_geometry(device, fovy=30.0)
+        model = model.eval()
+        print("Reconstruction model loaded.")
+    except Exception as e:
+        print(f"Error loading reconstruction model: {e}")
+        exit(1)
+        
+    # --- Define rembg session ---
+    rembg_session = None
+    if not args.no_rembg:
+        try:
+            rembg_session = rembg.new_session()
+            print("Rembg session created.")
+        except Exception as e:
+            print(f"Warning: Failed to create rembg session: {e}. Background removal disabled.")
+            args.no_rembg = True # Disable if session fails
+
+    # --- Batch or Single Image Processing ---
+    if args.batch_mode:
+        if not os.path.isdir(args.input_path):
+             print(f"Error: Batch mode selected, but input path '{args.input_path}' is not a valid directory.")
+             exit(1)
+             
+        input_dir = args.input_path
+        all_images = sorted(glob(os.path.join(input_dir, '*.png')))
+        if not all_images:
+             print(f"Error: No PNG images found in batch input directory: {input_dir}")
+             exit(1)
+        print(f"--- Starting Batch Mode: Found {len(all_images)} PNG images in {input_dir} ---")
+        
+        for img_path in tqdm(all_images, desc="Processing Batch"): # Add tqdm progress bar
+            img_name = os.path.splitext(os.path.basename(img_path))[0]
+            intermediate_dir = os.path.join(args.output_intermediate_path, f'data_{img_name}')
+            output_dir = os.path.join(args.output_3d_path, f'output_{img_name}')
+            os.makedirs(intermediate_dir, exist_ok=True)
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Pass 1: No Gemini
+            process_image(args, config, model_config, infer_config, device, 
+                          pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras, create inside
+                          img_path, intermediate_dir, output_dir, is_gemini_pass=False)
+            
+            # Pass 2: With Gemini
+            if gemini_available_flag:
+                 process_image(args, config, model_config, infer_config, device, 
+                               pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
+                               img_path, intermediate_dir, output_dir, is_gemini_pass=True)
+            else:
+                 print(f"  [{img_name}] Skipping Gemini pass (verifier not available/enabled).")
+
+        print("--- Batch processing complete. ---")
+
+    else: # Single Image Mode
+        input_file_to_process = None
+        if os.path.isdir(args.input_path):
+            print(f"Input path '{args.input_path}' is directory, finding first PNG...")
             try:
-                render_cameras = get_render_cameras(
-                    batch_size=1,
-                    M=120,
-                    radius=args.distance, # Use distance argument for rendering
-                    elevation=20.0,
-                    is_flexicubes=IS_FLEXICUBES,
-                ).to(device)
-
-                frames = render_frames(
-                    model,
-                    planes,
-                    render_cameras=render_cameras,
-                    render_size=render_size,
-                    chunk_size=chunk_size,
-                    is_flexicubes=IS_FLEXICUBES,
-                )
-
-                save_video(
-                    frames,
-                    video_path_idx,
-                    fps=30,
-                )
-                print(f"  Video saved to {video_path_idx}")
-            except Exception as e_render:
-                print(f"  Error rendering or saving video: {e_render}")
-
-print("\n--- Script Finished ---")
-
-if args.batch_mode and os.path.isdir(args.input_path):
-    from glob import glob
-    input_dir = args.input_path
-    all_images = sorted(glob(os.path.join(input_dir, '*.png')))
-    print(f"Batch mode: found {len(all_images)} PNG images in {input_dir}")
-    for img_path in all_images:
-        img_name = os.path.splitext(os.path.basename(img_path))[0]  # e.g., '0001'
+                 input_files = sorted(glob(os.path.join(args.input_path, '*.png')))
+                 if not input_files:
+                      print(f"Error: No PNG images found in directory '{args.input_path}'.")
+                      exit(1)
+                 input_file_to_process = input_files[0] # Process only the first image
+                 print(f"  Processing first image: {input_file_to_process}")
+            except Exception as e:
+                 print(f"Error reading directory '{args.input_path}': {e}")
+                 exit(1)
+        elif os.path.isfile(args.input_path):
+             input_file_to_process = args.input_path
+        else:
+             print(f"Error: Input path '{args.input_path}' is not a valid file or directory.")
+             exit(1)
+             
+        # Setup paths for single image mode
+        img_name = os.path.splitext(os.path.basename(input_file_to_process))[0]
         intermediate_dir = os.path.join(args.output_intermediate_path, f'data_{img_name}')
         output_dir = os.path.join(args.output_3d_path, f'output_{img_name}')
         os.makedirs(intermediate_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
-        # Pass 1: No Gemini
-        print(f"[Batch] Processing {img_name} (no Gemini)...")
-        try:
-            os.system(
-                f'python InstantMesh/run.py {args.config} '
-                f'--input_path {img_path} '
-                f'--output_intermediate_path {intermediate_dir} '
-                f'--output_3d_path {output_dir} '
-                f'--num_candidates 1 '
-                f'--view {args.view} '
-                f'--diffusion_steps {args.diffusion_steps} '
-                f'--seed {args.seed} '
-                f'--scale {args.scale} '
-                f'--distance {args.distance} '
-                f'--export_texmap {"--export_texmap" if args.export_texmap else ""} '
-                f'--save_video {"--save_video" if args.save_video else ""} '
-            )
-            # Rename/move OBJ
-            obj_path = os.path.join(output_dir, f'generation_{img_name}.obj')
-            if os.path.exists(obj_path):
-                os.rename(obj_path, os.path.join(output_dir, 'obj_no_gemini.obj'))
-        except Exception as e:
-            print(f"  [Batch] Error processing {img_name} (no Gemini): {e}")
-            continue
-        # Pass 2: With Gemini
-        print(f"[Batch] Processing {img_name} (with Gemini)...")
-        try:
-            os.system(
-                f'python InstantMesh/run.py {args.config} '
-                f'--input_path {img_path} '
-                f'--output_intermediate_path {intermediate_dir} '
-                f'--output_3d_path {output_dir} '
-                f'--num_candidates 3 '
-                f'--view {args.view} '
-                f'--diffusion_steps {args.diffusion_steps} '
-                f'--seed {args.seed} '
-                f'--scale {args.scale} '
-                f'--distance {args.distance} '
-                f'--export_texmap {"--export_texmap" if args.export_texmap else ""} '
-                f'--save_video {"--save_video" if args.save_video else ""} '
-            )
-            # Rename/move OBJ
-            obj_path = os.path.join(output_dir, f'generation_{img_name}.obj')
-            if os.path.exists(obj_path):
-                os.rename(obj_path, os.path.join(output_dir, 'obj_with_gemini.obj'))
-        except Exception as e:
-            print(f"  [Batch] Error processing {img_name} (with Gemini): {e}")
-            continue
-    print("Batch processing complete.")
-    exit(0)
+
+        # Determine if Gemini should run based on num_candidates for single mode
+        should_run_gemini_single = args.num_candidates > 1 and gemini_available_flag
+        
+        process_image(args, config, model_config, infer_config, device, 
+                      pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
+                      input_file_to_process, intermediate_dir, output_dir, 
+                      is_gemini_pass=should_run_gemini_single)
+
+        print("--- Single image processing complete. ---")
+
+    print("\n--- Script Finished ---")
