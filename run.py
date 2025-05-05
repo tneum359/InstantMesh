@@ -156,8 +156,9 @@ parser.add_argument('--export_texmap', action='store_true', help='Export a mesh 
 parser.add_argument('--save_video', action='store_true', help='Save a circular-view video.')
 parser.add_argument('--num_candidates', type=int, default=1, help='Number of candidate multiview groups to generate and evaluate.')
 parser.add_argument('--gemini_prompt', type=str, default=None, help='Prompt for Gemini verifier (defaults to reading from verifiers/verifier_prompt.txt).')
-parser.add_argument('--gen_width', type=int, default=1024, help='Width for multiview generation')
-parser.add_argument('--gen_height', type=int, default=1536, help='Height for multiview generation')
+parser.add_argument('--gen_width', type=int, default=640, help='Width for multiview generation')
+parser.add_argument('--gen_height', type=int, default=960, help='Height for multiview generation')
+parser.add_argument('--batch_mode', action='store_true', help='If set, process all PNGs in input_path directory with both no-Gemini and Gemini passes.')
 args = parser.parse_args()
 
 # --- Load default Gemini prompt from file if not provided --- Added
@@ -350,14 +351,12 @@ for idx, image_file in enumerate(input_files):
         generator = torch.Generator(device=device).manual_seed(current_seed)
         output_image_pil = None
 
-        print(f"    Generating multiview images with seed: {current_seed} at resolution: {args.gen_width}x{args.gen_height}...")
+        print(f"    Generating multiview images with seed: {current_seed}...")
         try:
             output_image_pil = pipeline(
                 input_image,
                 num_inference_steps=args.diffusion_steps,
                 generator=generator,
-                width=args.gen_width,
-                height=args.gen_height,
             ).images[0]
         except Exception as e:
             print(f"    Error during image generation for group {i+1}: {e}")
@@ -572,3 +571,65 @@ for idx, sample in enumerate(outputs_for_stage2):
                 print(f"  Error rendering or saving video: {e_render}")
 
 print("\n--- Script Finished ---")
+
+if args.batch_mode and os.path.isdir(args.input_path):
+    from glob import glob
+    input_dir = args.input_path
+    all_images = sorted(glob(os.path.join(input_dir, '*.png')))
+    print(f"Batch mode: found {len(all_images)} PNG images in {input_dir}")
+    for img_path in all_images:
+        img_name = os.path.splitext(os.path.basename(img_path))[0]  # e.g., '0001'
+        intermediate_dir = os.path.join(args.output_intermediate_path, f'data_{img_name}')
+        output_dir = os.path.join(args.output_3d_path, f'output_{img_name}')
+        os.makedirs(intermediate_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
+        # Pass 1: No Gemini
+        print(f"[Batch] Processing {img_name} (no Gemini)...")
+        try:
+            os.system(
+                f'python InstantMesh/run.py {args.config} '
+                f'--input_path {img_path} '
+                f'--output_intermediate_path {intermediate_dir} '
+                f'--output_3d_path {output_dir} '
+                f'--num_candidates 1 '
+                f'--view {args.view} '
+                f'--diffusion_steps {args.diffusion_steps} '
+                f'--seed {args.seed} '
+                f'--scale {args.scale} '
+                f'--distance {args.distance} '
+                f'--export_texmap {"--export_texmap" if args.export_texmap else ""} '
+                f'--save_video {"--save_video" if args.save_video else ""} '
+            )
+            # Rename/move OBJ
+            obj_path = os.path.join(output_dir, f'generation_{img_name}.obj')
+            if os.path.exists(obj_path):
+                os.rename(obj_path, os.path.join(output_dir, 'obj_no_gemini.obj'))
+        except Exception as e:
+            print(f"  [Batch] Error processing {img_name} (no Gemini): {e}")
+            continue
+        # Pass 2: With Gemini
+        print(f"[Batch] Processing {img_name} (with Gemini)...")
+        try:
+            os.system(
+                f'python InstantMesh/run.py {args.config} '
+                f'--input_path {img_path} '
+                f'--output_intermediate_path {intermediate_dir} '
+                f'--output_3d_path {output_dir} '
+                f'--num_candidates 3 '
+                f'--view {args.view} '
+                f'--diffusion_steps {args.diffusion_steps} '
+                f'--seed {args.seed} '
+                f'--scale {args.scale} '
+                f'--distance {args.distance} '
+                f'--export_texmap {"--export_texmap" if args.export_texmap else ""} '
+                f'--save_video {"--save_video" if args.save_video else ""} '
+            )
+            # Rename/move OBJ
+            obj_path = os.path.join(output_dir, f'generation_{img_name}.obj')
+            if os.path.exists(obj_path):
+                os.rename(obj_path, os.path.join(output_dir, 'obj_with_gemini.obj'))
+        except Exception as e:
+            print(f"  [Batch] Error processing {img_name} (with Gemini): {e}")
+            continue
+    print("Batch processing complete.")
+    exit(0)
