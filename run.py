@@ -382,7 +382,8 @@ for idx, image_file in enumerate(input_files):
                     print(f"      Overall Score: {avg_group_score:.2f}")
                     print(f"      Assessment: {result['overall_assessment']}")
                 else:
-                    print(f"    Error in Gemini evaluation: {gemini_result.get('error', 'Unknown error')}")
+                    error_msg = gemini_result.get('error', 'Unknown error') if isinstance(gemini_result, dict) else str(gemini_result)
+                    print(f"    Error in Gemini evaluation: {error_msg}")
                     avg_group_score = -1
                     gemini_result = None
             except Exception as e:
