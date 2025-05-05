@@ -21,6 +21,31 @@ sys.path.append(PARENT_DIR) # Changed from ROOT_DIR
 print(f"--- DEBUG: Added {PARENT_DIR} to sys.path ---") # Updated debug print
 # --- End sys.path modification ---
 
+# --- Google Drive Mount --- Added
+try:
+    from google.colab import drive
+    print("Attempting to mount Google Drive...")
+    drive.mount('/content/drive')
+    # Define Google Drive base paths
+    DRIVE_BASE_PATH = '/content/drive/MyDrive/final_project' # CHANGE THIS IF YOUR FOLDER IS DIFFERENT
+    DRIVE_INPUT_PATH = os.path.join(DRIVE_BASE_PATH, 'input_images')
+    DRIVE_INTERMEDIATE_PATH = os.path.join(DRIVE_BASE_PATH, 'intermediate_images')
+    DRIVE_OUTPUT_3D_PATH = os.path.join(DRIVE_BASE_PATH, 'output_3d')
+    print(f"Using Google Drive paths:\n  Input: {DRIVE_INPUT_PATH}\n  Intermediate: {DRIVE_INTERMEDIATE_PATH}\n  Output 3D: {DRIVE_OUTPUT_3D_PATH}")
+    # Ensure base output dirs exist
+    os.makedirs(DRIVE_INTERMEDIATE_PATH, exist_ok=True)
+    os.makedirs(DRIVE_OUTPUT_3D_PATH, exist_ok=True)
+    IS_COLAB = True
+except ImportError:
+    print("Google Colab not detected. Assuming local paths.")
+    IS_COLAB = False
+    # Define fallback local paths (optional, adjust as needed)
+    DRIVE_INPUT_PATH = None # Requires input_path argument
+    DRIVE_INTERMEDIATE_PATH = 'outputs/intermediate_images'
+    DRIVE_OUTPUT_3D_PATH = 'outputs/output_3d'
+    os.makedirs(DRIVE_INTERMEDIATE_PATH, exist_ok=True)
+    os.makedirs(DRIVE_OUTPUT_3D_PATH, exist_ok=True)
+
 # --- Added imports from scaling.py ---
 import json
 from datetime import datetime
@@ -33,8 +58,9 @@ import typing
 try:
     from verifiers.gemini_verifier import GeminiVerifier
     from verifiers.laion_aesthetics import LAIONAestheticVerifier
-except ImportError:
-    print("Warning: Failed to import verifiers. Make sure 'gemini_verifier.py' and 'laion_aesthetics.py' are accessible.")
+    print("Successfully imported verifiers.")
+except ImportError as e:
+    print(f"Warning: Failed to import verifiers ({e}). Make sure 'verifiers' directory is accessible from {PARENT_DIR}.")
     GeminiVerifier = None
     LAIONAestheticVerifier = None
 # --- End added imports ---
@@ -107,21 +133,49 @@ def render_frames(model, planes, render_cameras, render_size=512, chunk_size=1, 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('config', type=str, help='Path to config file.')
-parser.add_argument('input_path', type=str, help='Path to input image or directory.')
-parser.add_argument('--output_path', type=str, default='outputs/', help='Output directory.')
+parser.add_argument('--input_path', type=str, default=DRIVE_INPUT_PATH, help='Path to input image directory (defaults to GDrive path if mounted).')
+parser.add_argument('--output_intermediate_path', type=str, default=DRIVE_INTERMEDIATE_PATH, help='Base directory for intermediate outputs (defaults to GDrive path if mounted).')
+parser.add_argument('--output_3d_path', type=str, default=DRIVE_OUTPUT_3D_PATH, help='Base directory for final 3D outputs (defaults to GDrive path if mounted).')
 parser.add_argument('--diffusion_steps', type=int, default=75, help='Denoising Sampling steps.')
 parser.add_argument('--seed', type=int, default=42, help='Random seed for sampling.')
 parser.add_argument('--scale', type=float, default=1.0, help='Scale of generated object.')
 parser.add_argument('--distance', type=float, default=4.5, help='Render distance.')
-parser.add_argument('--view', type=int, default=6, choices=[4, 6], help='Number of input views.')
+parser.add_argument('--view', type=int, default=6, choices=[4, 6], help='Number of input views for reconstruction.')
 parser.add_argument('--no_rembg', action='store_true', help='Do not remove input background.')
 parser.add_argument('--export_texmap', action='store_true', help='Export a mesh with texture map.')
 parser.add_argument('--save_video', action='store_true', help='Save a circular-view video.')
-# --- Added arguments ---
 parser.add_argument('--num_candidates', type=int, default=1, help='Number of candidate multiview groups to generate and evaluate.')
-parser.add_argument('--gemini_prompt', type=str, default="A high-quality 3D render of the object.", help='Prompt for Gemini verifier.')
-# --- End added arguments ---
+parser.add_argument('--gemini_prompt', type=str, default=None, help='Prompt for Gemini verifier (defaults to reading from verifiers/verifier_prompt.txt).')
 args = parser.parse_args()
+
+# --- Load default Gemini prompt from file if not provided --- Added
+DEFAULT_GEMINI_PROMPT_FALLBACK = "Evaluate the quality of the generated 3D object views based on realism, detail, consistency, and adherence to the likely subject."
+if args.gemini_prompt is None:
+    prompt_file_path = os.path.join(PARENT_DIR, "verifiers", "verifier_prompt.txt")
+    print(f"--gemini_prompt not provided, attempting to load from {prompt_file_path}")
+    try:
+        with open(prompt_file_path, 'r') as f:
+            args.gemini_prompt = f.read()
+        print("  Successfully loaded default prompt from file.")
+    except FileNotFoundError:
+        print(f"  Warning: Default prompt file not found at {prompt_file_path}. Using fallback default.")
+        args.gemini_prompt = DEFAULT_GEMINI_PROMPT_FALLBACK
+    except Exception as e:
+        print(f"  Warning: Error reading default prompt file {prompt_file_path}: {e}. Using fallback default.")
+        args.gemini_prompt = DEFAULT_GEMINI_PROMPT_FALLBACK
+else:
+    print(f"Using provided --gemini_prompt.")
+# --- End loading default prompt ---
+
+# Ensure input path is provided if not using default GDrive path
+if args.input_path is None and not IS_COLAB:
+    parser.error("--input_path is required when not running in Google Colab or GDrive not mounted.")
+# Ensure output paths are valid
+if not os.path.isdir(args.output_intermediate_path):
+    os.makedirs(args.output_intermediate_path, exist_ok=True)
+if not os.path.isdir(args.output_3d_path):
+    os.makedirs(args.output_3d_path, exist_ok=True)
+
 seed_everything(args.seed)
 
 ###############################################################################
@@ -144,8 +198,8 @@ if use_gemini and not os.getenv("GEMINI_API_KEY"):
     print("Warning: GEMINI_API_KEY not found in .env file. Gemini verification will be skipped.")
     use_gemini = False
 if use_gemini and GeminiVerifier is None:
-     print("Warning: GeminiVerifier not imported correctly. Gemini verification will be skipped.")
-     use_gemini = False
+    print("Warning: GeminiVerifier not imported correctly. Gemini verification will be skipped.")
+    use_gemini = False
 # --- End Load Gemini API Key ---
 
 
@@ -211,28 +265,23 @@ if IS_FLEXICUBES:
     model.init_flexicubes_geometry(device, fovy=30.0)
 model = model.eval()
 
-# make output directories
-output_root = os.path.join(args.output_path, config_name)
-image_path = os.path.join(output_root, 'images') # For final selected images + input
-mesh_path = os.path.join(output_root, 'meshes')
-video_path = os.path.join(output_root, 'videos')
-# Intermediate path is now the parent for per-input intermediate folders
-intermediate_parent_path = os.path.join(output_root, 'intermediate_views')
-os.makedirs(image_path, exist_ok=True)
-os.makedirs(mesh_path, exist_ok=True)
-os.makedirs(video_path, exist_ok=True)
-os.makedirs(intermediate_parent_path, exist_ok=True) # Create the parent intermediate dir
-
 # process input files
-if os.path.isdir(args.input_path):
-    input_files = [
-        os.path.join(args.input_path, file) 
-        for file in os.listdir(args.input_path) 
-        if file.endswith('.png') or file.endswith('.jpg') or file.endswith('.webp')
-    ]
-else:
-    input_files = [args.input_path]
-print(f'Total number of input images: {len(input_files)}')
+input_image_dir = args.input_path
+if not os.path.isdir(input_image_dir):
+    print(f"Error: Input path '{input_image_dir}' is not a valid directory.")
+    sys.exit(1)
+
+input_files = sorted([ # Sort for consistent naming (e.g., 01, 02)
+    os.path.join(input_image_dir, file)
+    for file in os.listdir(input_image_dir)
+    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))
+])
+
+if not input_files:
+    print(f"Error: No valid image files found in '{input_image_dir}'.")
+    sys.exit(1)
+
+print(f'Total number of input images found: {len(input_files)}')
 
 
 ###############################################################################
@@ -242,99 +291,109 @@ print(f'Total number of input images: {len(input_files)}')
 rembg_session = None if args.no_rembg else rembg.new_session()
 
 outputs_for_stage2 = [] # Store data for the selected best views
-all_run_results = [] # Store metadata for all inputs
 
 for idx, image_file in enumerate(input_files):
     start_time = datetime.now()
-    name = os.path.basename(image_file).split('.')[0]
-    print(f'[{idx+1}/{len(input_files)}] Processing {name} ...')
+    # Extract base name without extension (e.g., "image_01")
+    name = os.path.splitext(os.path.basename(image_file))[0]
+    print(f'\n[{idx+1}/{len(input_files)}] Processing {name} (from {image_file}) ...')
 
-    # Create specific intermediate directory for this input
-    current_intermediate_path = os.path.join(intermediate_parent_path, name)
-    os.makedirs(current_intermediate_path, exist_ok=True)
-    print(f"  Saving intermediate views to: {current_intermediate_path}")
+    # --- Define output paths for this specific input --- Added
+    intermediate_subdir = os.path.join(args.output_intermediate_path, name)
+    os.makedirs(intermediate_subdir, exist_ok=True)
+
+    intermediate_image_path = os.path.join(intermediate_subdir, f'intermediate_{name}.png')
+    gemini_txt_path = os.path.join(intermediate_subdir, f'gemini_output_{name}.txt')
+    output_obj_path = os.path.join(args.output_3d_path, f'generation_{name}.obj')
+    output_video_path = os.path.join(intermediate_subdir, f'video_{name}.mp4') # Video saved in intermediate dir
+
+    print(f"  Intermediate outputs will be saved to: {intermediate_subdir}")
+    print(f"  Final 3D object will be saved to: {output_obj_path}")
+    # --- End path definition ---
 
     # remove background optionally
     print("  Preprocessing input image...")
-    input_image = Image.open(image_file)
+    try:
+        input_image = Image.open(image_file)
+    except Exception as e:
+        print(f"  Error opening image {image_file}: {e}. Skipping.")
+        continue
+
     if not args.no_rembg:
-        input_image = remove_background(input_image, rembg_session)
+        print("  Removing background...")
+        try:
+            input_image = remove_background(input_image, rembg_session)
+        except Exception as e:
+            print(f"  Error removing background: {e}. Proceeding with original image.")
         # Optional: Resize foreground (check if needed for zero123plus)
         # input_image = resize_foreground(input_image, 0.85)
 
+
     # --- Candidate Generation Loop ---
     best_group_data = {
-        "avg_score": -float('inf'), # Initialize lower for maximization
-        "images_tensor": None,      # Store Tensor for reconstruction
-        "gemini_scores": None,
-        "laion_scores": None,
+        "avg_score": -float('inf'),
+        "images_pil": None,        # Store PIL grid of BEST candidate
+        "images_tensor": None,     # Store Tensor of BEST candidate for reconstruction
+        "gemini_scores": None,     # Store Gemini JSON output for BEST candidate
+        "laion_scores": None,      # Store LAION scores for BEST candidate
         "seed": -1
     }
-    candidate_intermediate_files = [] # Store filenames for this input's candidates
 
     print(f"  Generating and evaluating {args.num_candidates} candidate groups...")
     for i in range(args.num_candidates):
         print(f"    --- Candidate Group {i+1}/{args.num_candidates} ---")
         current_seed = random.randint(0, 2**32 - 1)
         generator = torch.Generator(device=device).manual_seed(current_seed)
-        output_image_pil = None # Reset in case of generation error
+        output_image_pil = None
 
-        # sampling - Generate all 6 views at once
         print(f"    Generating multiview images with seed: {current_seed}...")
         try:
             output_image_pil = pipeline(
                 input_image,
                 num_inference_steps=args.diffusion_steps,
-                generator=generator, # Use seeded generator
+                generator=generator,
             ).images[0]
-            # output_image_pil is a 960x640 image with 6 views (3x2 grid)
         except Exception as e:
             print(f"    Error during image generation for group {i+1}: {e}")
-            # Attempt to save even if verification fails later, if generation succeeded partially
-            # continue # Skip to the next candidate group
+            continue
 
         if output_image_pil is None:
-             print(f"    Skipping candidate {i+1} due to generation failure.")
-             continue # Skip if generation failed entirely
+            print(f"    Skipping candidate {i+1} due to generation failure.")
+            continue
 
-        # Convert PIL image grid to tensor of individual images
         images_np = np.asarray(output_image_pil, dtype=np.float32) / 255.0
-        images_tensor = torch.from_numpy(images_np).permute(2, 0, 1).contiguous().float() # (3, 960, 640)
-        images_tensor = rearrange(images_tensor, 'c (n h) (m w) -> (n m) c h w', n=3, m=2) # (6, 3, 320, 320)
+        images_tensor = torch.from_numpy(images_np).permute(2, 0, 1).contiguous().float()
+        images_tensor = rearrange(images_tensor, 'c (n h) (m w) -> (n m) c h w', n=3, m=2)
 
-        # --- Verification ---
-        avg_group_score = -1.0 # Default score if verification fails or is skipped
-        avg_laion_score = None # Default LAION score
+        avg_group_score = -1.0
+        avg_laion_score = None
         current_gemini_results = []
         current_laion_results = []
 
         images_pil_list = [v2.functional.to_pil_image(img_t.cpu()) for img_t in images_tensor]
 
-        # Apply Gemini Verifier
         if use_gemini and gemini_verifier:
             print("    Applying Gemini Verifier...")
             gemini_prompts = [args.gemini_prompt] * len(images_pil_list)
             try:
                 gemini_inputs = gemini_verifier.prepare_inputs(images=images_pil_list, prompts=gemini_prompts)
-                current_gemini_results = gemini_verifier.score(inputs=gemini_inputs) # List of dicts
+                current_gemini_results = gemini_verifier.score(inputs=gemini_inputs)
                 group_overall_scores = [res.get("overall_score", {}).get("score", 0) for res in current_gemini_results]
                 if group_overall_scores:
                     avg_group_score = np.mean(group_overall_scores)
                 else:
-                    avg_group_score = 0 # Handle empty results
+                    avg_group_score = 0
                 print(f"    Gemini Average Overall Score for Group: {avg_group_score:.4f}")
             except Exception as e:
                 print(f"    Error during Gemini verification for group {i+1}: {e}")
-                avg_group_score = -1 # Penalize groups that fail verification
+                avg_group_score = -1
                 current_gemini_results = []
 
-        # Apply LAION Aesthetic Verifier
         if laion_verifier:
             print("    Applying LAION Aesthetic Verifier...")
             try:
-                # LAION verifier expects tensors on the correct device
                 laion_input_tensors = images_tensor.to(device, dtype=laion_verifier.dtype)
-                laion_inputs = laion_verifier.prepare_inputs(images=laion_input_tensors) # Pass tensor directly if possible, or handle PIL list conversion inside
+                laion_inputs = laion_verifier.prepare_inputs(images=laion_input_tensors)
                 current_laion_results = laion_verifier.score(inputs=laion_inputs)
                 avg_laion_score = np.mean([res["laion_aesthetic_score"] for res in current_laion_results])
                 print(f"    LAION Average Aesthetic Score for Group: {avg_laion_score:.4f}")
@@ -342,110 +401,53 @@ for idx, image_file in enumerate(input_files):
                 print(f"    Error during LAION verification for group {i+1}: {e}")
                 current_laion_results = []
 
-        # --- Save THIS candidate's intermediate image ---
-        # Construct filename with scores if available
-        gemini_score_str = f"{avg_group_score:.2f}" if avg_group_score != -1.0 else "N/A"
-        laion_score_str = f"{avg_laion_score:.2f}" if avg_laion_score is not None else "N/A"
-        intermediate_filename = os.path.join(
-            current_intermediate_path,
-            f'candidate_{i}_seed{current_seed}_gemini{gemini_score_str}_laion{laion_score_str}.png'
-        )
-        try:
-            output_image_pil.save(intermediate_filename)
-            print(f"    Saved candidate view grid to {intermediate_filename}")
-            candidate_intermediate_files.append(os.path.relpath(intermediate_filename, output_root)) # Store relative path for summary
-        except Exception as e:
-            print(f"    Error saving intermediate image for candidate {i+1}: {e}")
-        # --- End saving candidate ---
-
-
         # --- Update Best Group ---
         score_to_compare = avg_group_score if use_gemini else i
         if (use_gemini and score_to_compare > best_group_data["avg_score"]) or (not use_gemini and i == 0):
             print(f"    New best group found with score: {score_to_compare:.4f}")
             best_group_data["avg_score"] = score_to_compare
+            best_group_data["images_pil"] = output_image_pil # Save best PIL grid
             best_group_data["images_tensor"] = images_tensor
-            best_group_data["gemini_scores"] = current_gemini_results
+            best_group_data["gemini_scores"] = current_gemini_results # Save best scores JSON
             best_group_data["laion_scores"] = current_laion_results
             best_group_data["seed"] = current_seed
-    # --- End Candidate Generation Loop ---
+    # --- End Candidate Generation Loop --
 
-    # --- Process Best Group ---
+
+    # --- Process and Save Best Group's Outputs --- Modified
     if best_group_data["images_tensor"] is None:
         print(f"  No successful candidate groups generated or verified for {name}. Skipping reconstruction.")
-        # Still save summary data collected so far
-        run_result_data = {
-            "input_name": name,
-            "input_file": image_file,
-            "config": config_name,
-            "num_candidates": args.num_candidates,
-            "best_seed": best_group_data["seed"],
-            "best_gemini_avg_score": best_group_data["avg_score"] if use_gemini else None,
-            "best_laion_avg_score": avg_laion_score_best_group,
-            "gemini_prompt": args.gemini_prompt if use_gemini else None,
-            "representative_gemini_explanation": gemini_explanation if use_gemini else None,
-            "intermediate_view_files": candidate_intermediate_files, # Store list of all generated files
-            "processing_time_seconds": (datetime.now() - start_time).total_seconds()
-        }
-        all_run_results.append(run_result_data)
-        continue # Skip to the next input image
+        # Optional: Log skipped files
+        continue
 
     print(f"  Selected best group for {name} (Seed: {best_group_data['seed']}, Score: {best_group_data['avg_score']:.4f})")
 
-    # Prepare data for Stage 2 (Reconstruction)
+    # Save the best intermediate image grid
+    try:
+        best_group_data["images_pil"].save(intermediate_image_path)
+        print(f"  Saved best intermediate view grid to {intermediate_image_path}")
+    except Exception as e:
+        print(f"  Error saving best intermediate image: {e}")
+
+    # Save the best Gemini scores
+    if use_gemini and best_group_data["gemini_scores"]:
+        try:
+            with open(gemini_txt_path, 'w') as f:
+                json.dump(best_group_data["gemini_scores"], f, indent=4)
+            print(f"  Saved Gemini output to {gemini_txt_path}")
+        except Exception as e:
+            print(f"  Error saving Gemini output: {e}")
+    elif use_gemini:
+        print(f"  Skipping Gemini output save (no scores available or Gemini disabled).")
+
+
+    # Prepare data for Stage 2 (Reconstruction) - Pass the determined OBJ path
     outputs_for_stage2.append({
         'name': name,
-        'images': best_group_data["images_tensor"] # Pass the tensor (6, C, H, W)
+        'images': best_group_data["images_tensor"],
+        'output_obj_path': output_obj_path, # Pass the target save path
+        'output_video_path': output_video_path # Pass video path too
     })
-
-    # Save input image (processed)
-    input_image.save(os.path.join(image_path, f'{name}_input.png'))
-
-    # Save results summary for this input
-    avg_laion_score_best_group = np.mean([res["laion_aesthetic_score"] for res in best_group_data["laion_scores"]]) if best_group_data["laion_scores"] else None
-    gemini_explanation = "N/A"
-    if best_group_data["gemini_scores"] and isinstance(best_group_data["gemini_scores"], list) and len(best_group_data["gemini_scores"]) > 0:
-        first_img_scores = best_group_data["gemini_scores"][0]
-        if isinstance(first_img_scores, dict):
-             gemini_explanation = first_img_scores.get('overall_score', {}).get('explanation', "N/A")
-
-    run_result_data = {
-        "input_name": name,
-        "input_file": image_file,
-        "config": config_name,
-        "num_candidates": args.num_candidates,
-        "best_seed": best_group_data["seed"],
-        "best_gemini_avg_score": best_group_data["avg_score"] if use_gemini else None,
-        "best_laion_avg_score": avg_laion_score_best_group,
-        "gemini_prompt": args.gemini_prompt if use_gemini else None,
-        "representative_gemini_explanation": gemini_explanation if use_gemini else None,
-        "intermediate_view_files": candidate_intermediate_files, # Store list of all generated files
-        "processing_time_seconds": (datetime.now() - start_time).total_seconds()
-    }
-    all_run_results.append(run_result_data)
-
-# Save overall results JSON
-results_json_path = os.path.join(output_root, 'run_summary.json')
-try:
-    with open(results_json_path, 'w') as f:
-        json.dump(all_run_results, f, indent=4)
-    print(f"\nRun summary saved to {results_json_path}")
-except Exception as e:
-    print(f"\nError saving run summary JSON: {e}")
-
-
-# --- Optional: Delete pipeline and verifiers to save memory before reconstruction ---
-print("\nDeleting diffusion pipeline and verifiers to free memory...")
-try:
-    del pipeline
-    del gemini_verifier
-    del laion_verifier
-    if 'images_pil_list' in locals(): del images_pil_list # Clean up intermediate vars
-    if 'laion_input_tensors' in locals(): del laion_input_tensors
-    torch.cuda.empty_cache()
-except Exception as e:
-    print(f"  Error during cleanup: {e}")
-# --- End Optional Cleanup ---
 
 
 ###############################################################################
@@ -461,7 +463,9 @@ chunk_size = 20 if IS_FLEXICUBES else 1
 
 for idx, sample in enumerate(outputs_for_stage2):
     name = sample['name']
-    print(f'[{idx+1}/{len(outputs_for_stage2)}] Creating mesh for {name} ...')
+    mesh_path_idx = sample['output_obj_path'] # Use the path determined in Stage 1
+    video_path_idx = sample['output_video_path'] # Use the path determined in Stage 1
+    print(f'[{idx+1}/{len(outputs_for_stage2)}] Creating mesh for {name} -> {mesh_path_idx}')
 
     # Images are already (6, C, H, W) tensor from Stage 1
     images = sample['images'].unsqueeze(0).to(device) # Add batch dim -> (1, 6, C, H, W)
@@ -484,9 +488,6 @@ for idx, sample in enumerate(outputs_for_stage2):
 
         # get mesh
         print("  Extracting mesh...")
-        mesh_path_idx = os.path.join(mesh_path, f'{name}.obj')
-
-        # Adjust mesh extraction based on model type
         try:
             mesh_out = model.extract_mesh(
                 planes,
@@ -529,8 +530,7 @@ for idx, sample in enumerate(outputs_for_stage2):
         # get video
         if args.save_video:
             print("  Rendering video...")
-            video_path_idx = os.path.join(video_path, f'{name}.mp4')
-            render_size = infer_config.get('render_resolution', 512) # Use get with default
+            render_size = infer_config.get('render_resolution', 512)
             try:
                 render_cameras = get_render_cameras(
                     batch_size=1,
