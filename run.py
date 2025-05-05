@@ -365,9 +365,10 @@ for idx, image_file in enumerate(input_files):
         images_pil_list = [remove_background(img, rembg_session=rembg_session) for img in images_pil_list]
 
         # Convert cleaned PIL images back to tensor for reconstruction and saving
-        images_tensor = torch.stack([v2.functional.pil_to_tensor(img).float() / 255.0 for img in images_pil_list])
-        # Ensure correct shape for model: (1, 6, 3, H, W)
+        to_tensor = v2.ToTensor()
+        images_tensor = torch.stack([to_tensor(img) for img in images_pil_list])
         images_tensor = images_tensor.unsqueeze(0)
+        print("images_tensor shape:", images_tensor.shape, "dtype:", images_tensor.dtype, "min:", images_tensor.min().item(), "max:", images_tensor.max().item())
 
         if use_gemini and gemini_verifier:
             print("    Applying Gemini Verifier to evaluate multiview set...")
