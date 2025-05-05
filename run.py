@@ -274,19 +274,54 @@ def process_image(args, config, model_config, infer_config, device,
                 else:
                     print("  Warning: export_texmap requested but mesh output format unexpected. Saving with vertex colors.")
                     vertices, faces, vertex_colors = mesh_out # Fallback assuming vertex colors
-                    save_obj(vertices.data.cpu().numpy(), faces.data.cpu().numpy(), vertex_colors.data.cpu().numpy(), output_obj_path)
+                    # --- Safely convert to NumPy --- 
+                    verts_np = np.asarray(vertices) if isinstance(vertices, memoryview) else vertices.data.cpu().numpy()
+                    faces_np = np.asarray(faces) if isinstance(faces, memoryview) else faces.data.cpu().numpy()
+                    
+                    # Handle vertex_colors specifically based on error
+                    if isinstance(vertex_colors, memoryview):
+                        colors_np = np.asarray(vertex_colors)
+                    elif isinstance(vertex_colors, torch.Tensor):
+                        colors_np = vertex_colors.data.cpu().numpy()
+                    elif isinstance(vertex_colors, np.ndarray):
+                        colors_np = vertex_colors # Already numpy
+                    else:
+                        print(f"  Warning: Unexpected type for vertex_colors: {type(vertex_colors)}. Using fallback gray.")
+                        colors_np = np.ones_like(verts_np) * 0.5 
+                    # --- End Safe Conversion ---
+                    save_obj(verts_np, faces_np, colors_np, output_obj_path)
 
             else:
                 # Ensure mesh_out has vertex colors
                 if len(mesh_out) == 3:
                      vertices, faces, vertex_colors = mesh_out
-                     save_obj(vertices.data.cpu().numpy(), faces.data.cpu().numpy(), vertex_colors.data.cpu().numpy(), output_obj_path)
+                     # --- Safely convert to NumPy --- 
+                     verts_np = np.asarray(vertices) if isinstance(vertices, memoryview) else vertices.data.cpu().numpy()
+                     faces_np = np.asarray(faces) if isinstance(faces, memoryview) else faces.data.cpu().numpy()
+                     
+                     # Handle vertex_colors specifically based on error
+                     if isinstance(vertex_colors, memoryview):
+                         colors_np = np.asarray(vertex_colors)
+                     elif isinstance(vertex_colors, torch.Tensor):
+                         colors_np = vertex_colors.data.cpu().numpy()
+                     elif isinstance(vertex_colors, np.ndarray):
+                         colors_np = vertex_colors # Already numpy
+                     else:
+                         print(f"  Warning: Unexpected type for vertex_colors: {type(vertex_colors)}. Using fallback gray.")
+                         colors_np = np.ones_like(verts_np) * 0.5 
+                     # --- End Safe Conversion ---
+                     save_obj(verts_np, faces_np, colors_np, output_obj_path)
                 else:
                      print("  Warning: Vertex colors expected but mesh output format unexpected. Saving without colors.")
-                     vertices, faces = mesh_out # Fallback assuming only verts/faces
-                     # Need a dummy color array or modify save_obj
-                     dummy_colors = np.ones_like(vertices.data.cpu().numpy()) * 0.5 # Gray
-                     save_obj(vertices.data.cpu().numpy(), faces.data.cpu().numpy(), dummy_colors, output_obj_path)
+                     # Handle cases where only vertices and faces might be returned
+                     if len(mesh_out) == 2:
+                          vertices, faces = mesh_out
+                          verts_np = np.asarray(vertices) if isinstance(vertices, memoryview) else vertices.data.cpu().numpy()
+                          faces_np = np.asarray(faces) if isinstance(faces, memoryview) else faces.data.cpu().numpy()
+                          dummy_colors = np.ones_like(verts_np) * 0.5 # Gray
+                          save_obj(verts_np, faces_np, dummy_colors, output_obj_path)
+                     else:
+                          print(f"  Error: Unexpected number of items ({len(mesh_out)}) returned by extract_mesh. Cannot save OBJ.")
 
             
             # --- Rename the saved OBJ ---
