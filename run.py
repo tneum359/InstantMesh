@@ -388,7 +388,7 @@ if __name__ == "__main__":
     if args.input_path is None:
         parser.error("--input_path is required.")
 
-    # ----> ADDED DEBUG PRINTS <----
+    # ----> DEBUG PRINTS remain for info <----
     print(f"DEBUG: Final input path to check: {args.input_path}")
     try:
         exists = os.path.exists(args.input_path)
@@ -409,18 +409,50 @@ if __name__ == "__main__":
          print(f"DEBUG: Error during path check: {e}")
     # ----> END DEBUG PRINTS <----
 
-    # Check input path validity BEFORE proceeding (for both batch and single mode)
-    is_input_dir = os.path.isdir(args.input_path)
+    # --- Revised Path Validity Check ---
+    is_input_dir_os = os.path.isdir(args.input_path) # Check os.path.isdir first
     is_input_file = os.path.isfile(args.input_path)
+    can_glob_pngs = False
+    if not is_input_dir_os: # If os.path.isdir fails, try glob as fallback
+        try:
+            # Check if we can find any PNG files using glob
+            if glob(os.path.join(args.input_path, '*.png')):
+                 can_glob_pngs = True
+                 print(f"DEBUG: os.path.isdir failed, but glob found PNGs. Treating as directory.")
+            else:
+                 print(f"DEBUG: os.path.isdir failed, and glob found no PNGs.")
+        except Exception as e:
+             print(f"DEBUG: Error during glob check: {e}")
 
-    if args.batch_mode and not is_input_dir:
-        print(f"Error: Batch mode requires --input_path ('{args.input_path}') to be a valid directory (os.path.isdir failed).")
+    # Determine effective directory status for batch mode
+    is_effectively_input_dir = is_input_dir_os or can_glob_pngs
+
+    if args.batch_mode and not is_effectively_input_dir:
+        print(f"Error: Batch mode requires --input_path ('{args.input_path}') to be a directory containing PNGs (os.path.isdir and glob check failed).")
         exit(1)
-    if not args.batch_mode and not is_input_file and not is_input_dir:
-         # In single mode, if it's not a file, we check if it's a dir later
-         pass 
+    
+    # --- Single Mode Path Handling (Revised) ---
+    input_file_to_process_single = None
+    if not args.batch_mode:
+         if is_input_file:
+              input_file_to_process_single = args.input_path
+         elif is_effectively_input_dir: # If it's effectively a directory
+              print(f"Input path '{args.input_path}' is directory (single mode), finding first PNG...")
+              try:
+                   input_files = sorted(glob(os.path.join(args.input_path, '*.png')))
+                   if not input_files:
+                        print(f"Error: No PNG images found in directory '{args.input_path}'.")
+                        exit(1)
+                   input_file_to_process_single = input_files[0]
+                   print(f"  Processing first image: {input_file_to_process_single}")
+              except Exception as e:
+                   print(f"Error reading directory '{args.input_path}': {e}")
+                   exit(1)
+         else:
+              print(f"Error: Input path '{args.input_path}' is not a valid file or directory.")
+              exit(1)
 
-    # Ensure base output dirs exist (using final paths)
+    # --- Output Directory Creation ---
     try:
          os.makedirs(args.output_intermediate_path, exist_ok=True)
          os.makedirs(args.output_3d_path, exist_ok=True)
@@ -534,13 +566,15 @@ if __name__ == "__main__":
 
     # --- Batch or Single Image Processing ---
     if args.batch_mode:
-        # Input path validity already checked above
+        # Input path validity established above using is_effectively_input_dir
         input_dir = args.input_path
+        # Use glob directly again here as it's more reliable with Drive mount issues
         all_images = sorted(glob(os.path.join(input_dir, '*.png')))
         if not all_images:
-             print(f"Error: No PNG images found in batch input directory: {input_dir}")
+             # This check might be redundant if the initial check worked, but safe
+             print(f"Error: No PNG images found in batch input directory via glob: {input_dir}")
              exit(1)
-        print(f"--- Starting Batch Mode: Found {len(all_images)} PNG images in {input_dir} ---")
+        print(f"--- Starting Batch Mode: Found {len(all_images)} PNG images in {input_dir} (via glob) ---")
         
         for img_path in tqdm(all_images, desc="Processing Batch"): 
             img_name = os.path.splitext(os.path.basename(img_path))[0]
@@ -566,29 +600,15 @@ if __name__ == "__main__":
         print("--- Batch processing complete. ---")
 
     else: # Single Image Mode
-        input_file_to_process = None
-        if is_input_dir: # Check if the provided path was a directory
-            print(f"Input path '{args.input_path}' is directory, finding first PNG...")
-            try:
-                 input_files = sorted(glob(os.path.join(args.input_path, '*.png')))
-                 if not input_files:
-                      print(f"Error: No PNG images found in directory '{args.input_path}'.")
-                      exit(1)
-                 input_file_to_process = input_files[0]
-                 print(f"  Processing first image: {input_file_to_process}")
-            except Exception as e:
-                 print(f"Error reading directory '{args.input_path}': {e}")
-                 exit(1)
-        elif is_input_file:
-             input_file_to_process = args.input_path
-        else:
-             # This case should ideally be caught earlier, but added for safety
-             print(f"Error: Input path '{args.input_path}' is not valid.")
+        # Use the file determined earlier
+        input_file_to_process = input_file_to_process_single 
+        if input_file_to_process is None:
+            # Should not happen if logic above is correct
+             print("Error: Could not determine single input file to process.")
              exit(1)
              
         # Setup paths for single image mode
         img_name = os.path.splitext(os.path.basename(input_file_to_process))[0]
-        # Use the base output paths directly for single image mode
         intermediate_subdir = os.path.join(args.output_intermediate_path, f'data_{img_name}') 
         output_subdir = os.path.join(args.output_3d_path, f'output_{img_name}') 
         os.makedirs(intermediate_subdir, exist_ok=True)
