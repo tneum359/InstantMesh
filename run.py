@@ -406,7 +406,7 @@ for idx, image_file in enumerate(input_files):
         if (use_gemini and score_to_compare > best_group_data["avg_score"]) or (not use_gemini and i == 0):
             print(f"    New best group found with score: {score_to_compare:.4f}")
             best_group_data["avg_score"] = score_to_compare
-            best_group_data["images_pil"] = output_image_pil # Save best PIL grid
+            best_group_data["images_pil"] = images_pil_list # Save best PIL grid
             best_group_data["images_tensor"] = images_tensor
             best_group_data["gemini_scores"] = gemini_result # Save best scores JSON
             best_group_data["seed"] = current_seed
