@@ -345,42 +345,68 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # --- Google Drive Mount & Path Handling ---
+    # --- Google Drive Mount & Path Handling (Revised Logic) ---
     IS_COLAB = 'google.colab' in sys.modules
-    DRIVE_BASE_PATH = None
     if IS_COLAB:
         try:
             from google.colab import drive
             print("Attempting to mount Google Drive...")
-            drive.mount('/content/drive')
-            # Assume base path unless overridden by user args
-            potential_drive_base = '/content/drive/MyDrive/final_project' # Adjust if needed
-            if os.path.isdir(potential_drive_base):
-                 DRIVE_BASE_PATH = potential_drive_base
-                 print(f"Google Drive mounted. Default base path: {DRIVE_BASE_PATH}")
-                 # Set default args if they weren't provided
-                 if args.input_path is None: args.input_path = os.path.join(DRIVE_BASE_PATH, 'input_images')
-                 if args.output_intermediate_path == 'outputs/intermediate_images': args.output_intermediate_path = os.path.join(DRIVE_BASE_PATH, 'intermediate_images')
-                 if args.output_3d_path == 'outputs/output_3d': args.output_3d_path = os.path.join(DRIVE_BASE_PATH, 'output_3d')
+            drive.mount('/content/drive', force_remount=True) # Force remount
+            print("Google Drive mount command executed.")
+            # Check if the core drive mount point exists after attempting mount
+            if not os.path.exists('/content/drive/MyDrive'):
+                 print("Warning: /content/drive/MyDrive not found after mounting. Check permissions/setup.")
+                 # Proceed assuming local paths might still be correct if user provided them
             else:
-                 print(f"Warning: Drive mounted, but default base path {potential_drive_base} not found.")
-                 IS_COLAB = False # Treat as local if base path missing
-        except Exception as e:
-            print(f"Warning: Failed to mount Google Drive: {e}. Falling back to local paths.")
-            IS_COLAB = False
+                 print("Base Google Drive directory confirmed.")
+                 # Define potential base for *defaulting* only
+                 potential_drive_base = '/content/drive/MyDrive/final_project' 
+                 # Set default paths ONLY if user did not provide them
+                 if args.input_path is None:
+                      default_input = os.path.join(potential_drive_base, 'input_images')
+                      if os.path.isdir(default_input):
+                           args.input_path = default_input
+                           print(f"Using default Drive input path: {args.input_path}")
+                      else:
+                           print(f"Warning: Default Drive input path not found: {default_input}")
+                 
+                 if args.output_intermediate_path == 'outputs/intermediate_images': # Check if default
+                      default_intermediate = os.path.join(potential_drive_base, 'intermediate_images')
+                      # Create if needed, but use the path regardless if default
+                      args.output_intermediate_path = default_intermediate
+                      print(f"Using default Drive intermediate path: {args.output_intermediate_path}")
+                          
+                 if args.output_3d_path == 'outputs/output_3d': # Check if default
+                      default_3d = os.path.join(potential_drive_base, 'output_3d')
+                      args.output_3d_path = default_3d
+                      print(f"Using default Drive 3D output path: {args.output_3d_path}")
 
-    if not IS_COLAB:
-        print("Using local paths (or Drive mount failed/path invalid).")
-        # Require input path if not using Colab/Drive defaults
-        if args.input_path is None:
-            parser.error("--input_path is required when not using Colab/Drive or if Drive mount failed.")
-    
-    # Ensure base output dirs exist (local or Drive)
+        except Exception as e:
+            print(f"Warning: Error during Google Drive mount/check: {e}. Proceeding with provided paths.")
+
+    # --- Final Path Checks and Directory Creation ---
+    if args.input_path is None:
+        # This should only happen if not in Colab and no path provided
+        parser.error("--input_path is required.")
+
+    # Check input path validity BEFORE proceeding (for both batch and single mode)
+    # This check now uses the potentially user-provided path directly
+    is_input_dir = os.path.isdir(args.input_path)
+    is_input_file = os.path.isfile(args.input_path)
+
+    if args.batch_mode and not is_input_dir:
+        print(f"Error: Batch mode requires --input_path ('{args.input_path}') to be a valid directory.")
+        exit(1)
+    if not args.batch_mode and not is_input_file and not is_input_dir:
+         # In single mode, if it's not a file, we check if it's a dir later
+         pass 
+
+    # Ensure base output dirs exist (using final paths)
     try:
          os.makedirs(args.output_intermediate_path, exist_ok=True)
          os.makedirs(args.output_3d_path, exist_ok=True)
-         print(f"Intermediate output base: {args.output_intermediate_path}")
-         print(f"3D output base: {args.output_3d_path}")
+         print(f"Intermediate output base set to: {args.output_intermediate_path}")
+         print(f"3D output base set to: {args.output_3d_path}")
     except Exception as e:
          print(f"Error creating output directories: {e}")
          exit(1)
@@ -489,10 +515,7 @@ if __name__ == "__main__":
 
     # --- Batch or Single Image Processing ---
     if args.batch_mode:
-        if not os.path.isdir(args.input_path):
-             print(f"Error: Batch mode selected, but input path '{args.input_path}' is not a valid directory.")
-             exit(1)
-             
+        # Input path validity already checked above
         input_dir = args.input_path
         all_images = sorted(glob(os.path.join(input_dir, '*.png')))
         if not all_images:
@@ -500,23 +523,24 @@ if __name__ == "__main__":
              exit(1)
         print(f"--- Starting Batch Mode: Found {len(all_images)} PNG images in {input_dir} ---")
         
-        for img_path in tqdm(all_images, desc="Processing Batch"): # Add tqdm progress bar
+        for img_path in tqdm(all_images, desc="Processing Batch"): 
             img_name = os.path.splitext(os.path.basename(img_path))[0]
-            intermediate_dir = os.path.join(args.output_intermediate_path, f'data_{img_name}')
-            output_dir = os.path.join(args.output_3d_path, f'output_{img_name}')
-            os.makedirs(intermediate_dir, exist_ok=True)
-            os.makedirs(output_dir, exist_ok=True)
+            # Create specific subdirs for this image
+            intermediate_subdir = os.path.join(args.output_intermediate_path, f'data_{img_name}')
+            output_subdir = os.path.join(args.output_3d_path, f'output_{img_name}')
+            os.makedirs(intermediate_subdir, exist_ok=True)
+            os.makedirs(output_subdir, exist_ok=True)
             
             # Pass 1: No Gemini
             process_image(args, config, model_config, infer_config, device, 
-                          pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras, create inside
-                          img_path, intermediate_dir, output_dir, is_gemini_pass=False)
+                          pipeline, model, gemini_verifier, rembg_session, None, 
+                          img_path, intermediate_subdir, output_subdir, is_gemini_pass=False)
             
             # Pass 2: With Gemini
             if gemini_available_flag:
                  process_image(args, config, model_config, infer_config, device, 
-                               pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
-                               img_path, intermediate_dir, output_dir, is_gemini_pass=True)
+                               pipeline, model, gemini_verifier, rembg_session, None,
+                               img_path, intermediate_subdir, output_subdir, is_gemini_pass=True)
             else:
                  print(f"  [{img_name}] Skipping Gemini pass (verifier not available/enabled).")
 
@@ -524,37 +548,38 @@ if __name__ == "__main__":
 
     else: # Single Image Mode
         input_file_to_process = None
-        if os.path.isdir(args.input_path):
+        if is_input_dir: # Check if the provided path was a directory
             print(f"Input path '{args.input_path}' is directory, finding first PNG...")
             try:
                  input_files = sorted(glob(os.path.join(args.input_path, '*.png')))
                  if not input_files:
                       print(f"Error: No PNG images found in directory '{args.input_path}'.")
                       exit(1)
-                 input_file_to_process = input_files[0] # Process only the first image
+                 input_file_to_process = input_files[0]
                  print(f"  Processing first image: {input_file_to_process}")
             except Exception as e:
                  print(f"Error reading directory '{args.input_path}': {e}")
                  exit(1)
-        elif os.path.isfile(args.input_path):
+        elif is_input_file:
              input_file_to_process = args.input_path
         else:
-             print(f"Error: Input path '{args.input_path}' is not a valid file or directory.")
+             # This case should ideally be caught earlier, but added for safety
+             print(f"Error: Input path '{args.input_path}' is not valid.")
              exit(1)
              
         # Setup paths for single image mode
         img_name = os.path.splitext(os.path.basename(input_file_to_process))[0]
-        intermediate_dir = os.path.join(args.output_intermediate_path, f'data_{img_name}')
-        output_dir = os.path.join(args.output_3d_path, f'output_{img_name}')
-        os.makedirs(intermediate_dir, exist_ok=True)
-        os.makedirs(output_dir, exist_ok=True)
+        # Use the base output paths directly for single image mode
+        intermediate_subdir = os.path.join(args.output_intermediate_path, f'data_{img_name}') 
+        output_subdir = os.path.join(args.output_3d_path, f'output_{img_name}') 
+        os.makedirs(intermediate_subdir, exist_ok=True)
+        os.makedirs(output_subdir, exist_ok=True)
 
-        # Determine if Gemini should run based on num_candidates for single mode
         should_run_gemini_single = args.num_candidates > 1 and gemini_available_flag
         
         process_image(args, config, model_config, infer_config, device, 
-                      pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
-                      input_file_to_process, intermediate_dir, output_dir, 
+                      pipeline, model, gemini_verifier, rembg_session, None, 
+                      input_file_to_process, intermediate_subdir, output_subdir, 
                       is_gemini_pass=should_run_gemini_single)
 
         print("--- Single image processing complete. ---")
