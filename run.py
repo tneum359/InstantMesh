@@ -25,21 +25,31 @@ print(f"--- DEBUG: Added {PARENT_DIR} to sys.path ---") # Updated debug print
 try:
     from google.colab import drive
     print("Attempting to mount Google Drive...")
-    drive.mount('/content/drive')
-    # Define Google Drive base paths
-    DRIVE_BASE_PATH = '/content/drive/MyDrive/final_project' # CHANGE THIS IF YOUR FOLDER IS DIFFERENT
-    DRIVE_INPUT_PATH = os.path.join(DRIVE_BASE_PATH, 'input_images')
-    DRIVE_INTERMEDIATE_PATH = os.path.join(DRIVE_BASE_PATH, 'intermediate_images')
-    DRIVE_OUTPUT_3D_PATH = os.path.join(DRIVE_BASE_PATH, 'output_3d')
-    print(f"Using Google Drive paths:\n  Input: {DRIVE_INPUT_PATH}\n  Intermediate: {DRIVE_INTERMEDIATE_PATH}\n  Output 3D: {DRIVE_OUTPUT_3D_PATH}")
-    # Ensure base output dirs exist
-    os.makedirs(DRIVE_INTERMEDIATE_PATH, exist_ok=True)
-    os.makedirs(DRIVE_OUTPUT_3D_PATH, exist_ok=True)
-    IS_COLAB = True
+    try:
+        drive.mount('/content/drive')
+        # Define Google Drive base paths
+        DRIVE_BASE_PATH = '/content/drive/MyDrive/final_project' # CHANGE THIS IF YOUR FOLDER IS DIFFERENT
+        DRIVE_INPUT_PATH = os.path.join(DRIVE_BASE_PATH, 'input_images')
+        DRIVE_INTERMEDIATE_PATH = os.path.join(DRIVE_BASE_PATH, 'intermediate_images')
+        DRIVE_OUTPUT_3D_PATH = os.path.join(DRIVE_BASE_PATH, 'output_3d')
+        print(f"Using Google Drive paths:\n  Input: {DRIVE_INPUT_PATH}\n  Intermediate: {DRIVE_INTERMEDIATE_PATH}\n  Output 3D: {DRIVE_OUTPUT_3D_PATH}")
+        # Ensure base output dirs exist
+        os.makedirs(DRIVE_INTERMEDIATE_PATH, exist_ok=True)
+        os.makedirs(DRIVE_OUTPUT_3D_PATH, exist_ok=True)
+        IS_COLAB = True
+    except Exception as e:
+        print(f"Warning: Failed to mount Google Drive: {e}")
+        print("Falling back to local paths.")
+        IS_COLAB = False
+        DRIVE_INPUT_PATH = None
+        DRIVE_INTERMEDIATE_PATH = 'outputs/intermediate_images'
+        DRIVE_OUTPUT_3D_PATH = 'outputs/output_3d'
+        os.makedirs(DRIVE_INTERMEDIATE_PATH, exist_ok=True)
+        os.makedirs(DRIVE_OUTPUT_3D_PATH, exist_ok=True)
 except ImportError:
-    print("Google Colab not detected. Assuming local paths.")
+    print("Google Colab not detected. Using local paths.")
     IS_COLAB = False
-    # Define fallback local paths (optional, adjust as needed)
+    # Define fallback local paths
     DRIVE_INPUT_PATH = None # Requires input_path argument
     DRIVE_INTERMEDIATE_PATH = 'outputs/intermediate_images'
     DRIVE_OUTPUT_3D_PATH = 'outputs/output_3d'
@@ -57,12 +67,10 @@ import typing
 # Assuming verifier scripts are in a 'verifiers' subdirectory or python path
 try:
     from verifiers.gemini_verifier import GeminiVerifier
-    from verifiers.laion_aesthetics import LAIONAestheticVerifier
     print("Successfully imported verifiers.")
 except ImportError as e:
     print(f"Warning: Failed to import verifiers ({e}). Make sure 'verifiers' directory is accessible from {PARENT_DIR}.")
     GeminiVerifier = None
-    LAIONAestheticVerifier = None
 # --- End added imports ---
 
 from src.utils.train_util import instantiate_from_config
@@ -198,10 +206,8 @@ if use_gemini and not os.getenv("GEMINI_API_KEY"):
     print("Warning: GEMINI_API_KEY not found in .env file. Gemini verification will be skipped.")
     use_gemini = False
 if use_gemini and GeminiVerifier is None:
-    print("Warning: GeminiVerifier not imported correctly. Gemini verification will be skipped.")
+    print("Warning: GeminiVerifier not available. Gemini verification will be skipped.")
     use_gemini = False
-# --- End Load Gemini API Key ---
-
 
 # load diffusion model
 print('Loading diffusion model ...')
@@ -225,29 +231,16 @@ pipeline.unet.load_state_dict(state_dict, strict=True)
 
 pipeline = pipeline.to(device)
 
-# --- Initialize Verifiers ---
+# Initialize verifiers if needed
 gemini_verifier = None
-laion_verifier = None
 if use_gemini:
-    print("Initializing Gemini verifier...")
+    print("Initializing Gemini Verifier...")
     try:
-        gemini_verifier = GeminiVerifier() # Requires GEMINI_API_KEY
+        gemini_verifier = GeminiVerifier()
+        print("Gemini Verifier initialized successfully.")
     except Exception as e:
-        print(f"Error initializing GeminiVerifier: {e}. Disabling Gemini verification.")
+        print(f"Error initializing Gemini Verifier: {e}")
         use_gemini = False
-
-# Initialize LAION verifier regardless (can be used for info even if Gemini selects)
-print("Initializing LAION Aesthetic verifier...")
-try:
-    if LAIONAestheticVerifier:
-        laion_verifier = LAIONAestheticVerifier(dtype=torch.float16 if torch.cuda.is_available() else torch.float32)
-    else:
-        print("Warning: LAIONAestheticVerifier not imported.")
-except Exception as e:
-    print(f"Error initializing LAIONAestheticVerifier: {e}")
-    laion_verifier = None
-# --- End Initialize Verifiers ---
-
 
 # load reconstruction model
 print('Loading reconstruction model ...')
@@ -335,7 +328,6 @@ for idx, image_file in enumerate(input_files):
         "images_pil": None,        # Store PIL grid of BEST candidate
         "images_tensor": None,     # Store Tensor of BEST candidate for reconstruction
         "gemini_scores": None,     # Store Gemini JSON output for BEST candidate
-        "laion_scores": None,      # Store LAION scores for BEST candidate
         "seed": -1
     }
 
@@ -366,9 +358,7 @@ for idx, image_file in enumerate(input_files):
         images_tensor = rearrange(images_tensor, 'c (n h) (m w) -> (n m) c h w', n=3, m=2)
 
         avg_group_score = -1.0
-        avg_laion_score = None
         current_gemini_results = []
-        current_laion_results = []
 
         images_pil_list = [v2.functional.to_pil_image(img_t.cpu()) for img_t in images_tensor]
 
@@ -389,18 +379,6 @@ for idx, image_file in enumerate(input_files):
                 avg_group_score = -1
                 current_gemini_results = []
 
-        if laion_verifier:
-            print("    Applying LAION Aesthetic Verifier...")
-            try:
-                laion_input_tensors = images_tensor.to(device, dtype=laion_verifier.dtype)
-                laion_inputs = laion_verifier.prepare_inputs(images=laion_input_tensors)
-                current_laion_results = laion_verifier.score(inputs=laion_inputs)
-                avg_laion_score = np.mean([res["laion_aesthetic_score"] for res in current_laion_results])
-                print(f"    LAION Average Aesthetic Score for Group: {avg_laion_score:.4f}")
-            except Exception as e:
-                print(f"    Error during LAION verification for group {i+1}: {e}")
-                current_laion_results = []
-
         # --- Update Best Group ---
         score_to_compare = avg_group_score if use_gemini else i
         if (use_gemini and score_to_compare > best_group_data["avg_score"]) or (not use_gemini and i == 0):
@@ -409,7 +387,6 @@ for idx, image_file in enumerate(input_files):
             best_group_data["images_pil"] = output_image_pil # Save best PIL grid
             best_group_data["images_tensor"] = images_tensor
             best_group_data["gemini_scores"] = current_gemini_results # Save best scores JSON
-            best_group_data["laion_scores"] = current_laion_results
             best_group_data["seed"] = current_seed
     # --- End Candidate Generation Loop --
 
