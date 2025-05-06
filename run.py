@@ -19,6 +19,8 @@ import json
 import random
 import traceback
 import subprocess # Import subprocess
+import base64
+from io import BytesIO
 
 # --- Add parent directory to sys.path ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -233,19 +235,51 @@ def process_image(args, config, model_config, infer_config, device,
             if is_gemini_pass and gemini_verifier is not None:
                 # We need to pass the RGBA list before compositing for Gemini scoring
                 # If rembg failed, we created RGBA versions as fallback
-                images_for_gemini = multiview_pil_list_nobg_rgba if (not args.no_rembg and rembg_session is not None) else [img.convert("RGBA") for img in multiview_pil_list_raw]
+                images_pil_for_gemini = multiview_pil_list_nobg_rgba if (not args.no_rembg and rembg_session is not None) else [img.convert("RGBA") for img in multiview_pil_list_raw]
+                
+                # ---> Prepare inputs dictionary for Gemini score method <--- 
+                print(f"    Preparing data for Gemini scoring...")
+                gemini_input_data = {"images": [], "prompt": args.gemini_prompt} # Use prompt from args
+                for img in images_pil_for_gemini:
+                     try:
+                          buffered = BytesIO()
+                          img.save(buffered, format="PNG")
+                          img_str = base64.b64encode(buffered.getvalue()).decode()
+                          gemini_input_data["images"].append({
+                              "mime_type": "image/png",
+                              "data": img_str
+                          })
+                     except Exception as e:
+                          print(f"      Warning: Failed to encode an image for Gemini: {e}")
+                          # Optionally skip this image or the whole candidate?
+                          # For now, let's allow it to proceed with fewer images if one fails
+                # ---> End Prepare inputs <--- 
+
                 print(f"    Scoring candidate group {candidate_idx + 1} with Gemini...")
-                try:
-                    candidate_metadata = gemini_verifier.score(images=images_for_gemini)
-                    if candidate_metadata and isinstance(candidate_metadata.get('average_overall_score'), (int, float)):
-                         current_score = candidate_metadata['average_overall_score']
-                         print(f"    Gemini Score: {current_score:.4f}")
-                    else:
-                         print("    Warning: Gemini did not return a valid average_overall_score.")
-                except Exception as e:
-                    print(f"    Error during Gemini scoring: {e}")
-                    traceback.print_exc()
-                    # Keep score 0, proceed without Gemini result for this candidate
+                if not gemini_input_data["images"]:
+                     print(f"    Skipping Gemini scoring: No images successfully encoded.")
+                else:
+                     try:
+                          # Call score with the prepared dictionary
+                          gemini_result = gemini_verifier.score(inputs=gemini_input_data) 
+                          
+                          # Process the result (check success, extract score)
+                          if gemini_result.get("success"):
+                               candidate_metadata = gemini_result.get("result")
+                               if candidate_metadata and isinstance(candidate_metadata.get('overall_score'), (int, float)):
+                                    current_score = candidate_metadata['overall_score']
+                                    print(f"    Gemini Score: {current_score:.4f}")
+                               else:
+                                    print("    Warning: Gemini did not return a valid overall_score.")
+                          else:
+                               print(f"    Warning: Gemini evaluation failed: {gemini_result.get('error', 'Unknown error')}")
+                               if gemini_result.get('raw_response'):
+                                    print(f"      Raw Gemini Response: {gemini_result['raw_response'][:200]}...") # Print first 200 chars
+
+                     except Exception as e:
+                          print(f"    Error calling Gemini score method: {e}")
+                          traceback.print_exc()
+                          # Keep score 0, proceed without Gemini result for this candidate
             else:
                  # If not Gemini pass, score is 0, use first candidate
                  pass
