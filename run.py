@@ -58,6 +58,46 @@ def get_render_cameras(batch_size=1, M=120, radius=4.0, elevation=20.0, is_flexi
         cameras = cameras.unsqueeze(0).repeat(batch_size, 1, 1)
     return cameras
 
+# --- Function to safely convert mesh component to NumPy ---
+def safe_to_numpy(component):
+    if isinstance(component, memoryview):
+        return np.asarray(component)
+    elif hasattr(component, 'data'):
+        # Check if the .data attribute itself is a memoryview
+        if isinstance(component.data, memoryview):
+            return np.asarray(component.data)
+        # Otherwise, assume .data can be moved to cpu/converted
+        try:
+            return component.data.cpu().numpy()
+        except AttributeError:
+             print(f"  Warning: component.data has no .cpu() or .numpy() method. Trying direct conversion.")
+             try:
+                  return np.array(component.data)
+             except Exception as e:
+                  print(f"  Error converting component.data to numpy: {e}. Returning None.")
+                  return None
+    elif isinstance(component, np.ndarray):
+        return component # Already numpy
+    elif isinstance(component, torch.Tensor):
+        # Handle direct tensors without a .data attribute if needed
+        try:
+             return component.cpu().numpy()
+        except AttributeError:
+             print(f"  Warning: Tensor component has no .cpu() or .numpy() method. Trying direct conversion.")
+             try:
+                  return np.array(component)
+             except Exception as e:
+                  print(f"  Error converting Tensor component to numpy: {e}. Returning None.")
+                  return None
+    else:
+        # Fallback for other types
+        try:
+            return np.array(component)
+        except Exception as e:
+             print(f"  Warning: Cannot convert component of type {type(component)} to numpy: {e}. Returning None.")
+             return None
+# --- End Helper Function ---
+
 # --- Core Processing Function ---
 def process_image(args, config, model_config, infer_config, device, 
                   pipeline, model, gemini_verifier, rembg_session, input_cameras,
@@ -266,59 +306,63 @@ def process_image(args, config, model_config, infer_config, device,
                 # Check if mesh_out has the expected components
                 if len(mesh_out) == 5:
                     vertices, faces, uvs, mesh_tex_idx, tex_map = mesh_out
-                    save_obj_with_mtl(
-                        vertices.data.cpu().numpy(), uvs.data.cpu().numpy(), faces.data.cpu().numpy(),
-                        mesh_tex_idx.data.cpu().numpy(), tex_map.permute(1, 2, 0).data.cpu().numpy(),
-                        output_obj_path
-                    )
+                    # Apply safe_to_numpy to each component needed for save_obj_with_mtl
+                    verts_np = safe_to_numpy(vertices)
+                    uvs_np = safe_to_numpy(uvs) 
+                    faces_np = safe_to_numpy(faces)
+                    mesh_tex_idx_np = safe_to_numpy(mesh_tex_idx)
+                    tex_map_np = safe_to_numpy(tex_map.permute(1, 2, 0)) # Handle permute if tex_map is tensor
+                    if verts_np is None or uvs_np is None or faces_np is None or mesh_tex_idx_np is None or tex_map_np is None:
+                        print(f"  Error: Failed to convert one or more mesh components to NumPy. Cannot save OBJ.")
+                    else:
+                        save_obj_with_mtl(verts_np, uvs_np, faces_np, mesh_tex_idx_np, tex_map_np, output_obj_path)
                 else:
                     print("  Warning: export_texmap requested but mesh output format unexpected. Saving with vertex colors.")
                     vertices, faces, vertex_colors = mesh_out # Fallback assuming vertex colors
-                    # --- Safely convert ALL components to NumPy --- 
-                    verts_np = np.asarray(vertices) if isinstance(vertices, memoryview) else (vertices.data.cpu().numpy() if hasattr(vertices, 'data') else np.array(vertices))
-                    faces_np = np.asarray(faces) if isinstance(faces, memoryview) else (faces.data.cpu().numpy() if hasattr(faces, 'data') else np.array(faces))
-                    
-                    if isinstance(vertex_colors, memoryview):
-                        colors_np = np.asarray(vertex_colors)
-                    elif hasattr(vertex_colors, 'data'): # Check for tensor-like
-                        colors_np = vertex_colors.data.cpu().numpy()
-                    elif isinstance(vertex_colors, np.ndarray):
-                        colors_np = vertex_colors # Already numpy
+                    # --- Use Safe Conversion Function --- 
+                    verts_np = safe_to_numpy(vertices)
+                    faces_np = safe_to_numpy(faces)
+                    colors_np = safe_to_numpy(vertex_colors)
+
+                    if verts_np is None or faces_np is None or colors_np is None:
+                        print(f"  Error: Failed to convert one or more mesh components to NumPy. Cannot save OBJ.")
                     else:
-                        print(f"  Warning: Unexpected type for vertex_colors: {type(vertex_colors)}. Using fallback gray.")
-                        colors_np = np.ones_like(verts_np) * 0.5 
-                    # --- End Safe Conversion ---
-                    save_obj(verts_np, faces_np, colors_np, output_obj_path)
+                        # Handle potential shape mismatch if color conversion failed differently
+                        if colors_np.shape[0] != verts_np.shape[0]:
+                             print(f"  Warning: Vertex and color array lengths mismatch ({verts_np.shape[0]} vs {colors_np.shape[0]}). Using fallback gray.")
+                             colors_np = np.ones_like(verts_np) * 0.5
+                        save_obj(verts_np, faces_np, colors_np, output_obj_path)
 
             else:
                 # Ensure mesh_out has vertex colors
                 if len(mesh_out) == 3:
                      vertices, faces, vertex_colors = mesh_out
-                     # --- Safely convert ALL components to NumPy --- 
-                     verts_np = np.asarray(vertices) if isinstance(vertices, memoryview) else (vertices.data.cpu().numpy() if hasattr(vertices, 'data') else np.array(vertices))
-                     faces_np = np.asarray(faces) if isinstance(faces, memoryview) else (faces.data.cpu().numpy() if hasattr(faces, 'data') else np.array(faces))
+                     # --- Use Safe Conversion Function --- 
+                     verts_np = safe_to_numpy(vertices)
+                     faces_np = safe_to_numpy(faces)
                      
-                     if isinstance(vertex_colors, memoryview):
-                         colors_np = np.asarray(vertex_colors)
-                     elif hasattr(vertex_colors, 'data'): # Check for tensor-like
-                         colors_np = vertex_colors.data.cpu().numpy()
-                     elif isinstance(vertex_colors, np.ndarray):
-                         colors_np = vertex_colors # Already numpy
+                     if verts_np is None or faces_np is None:
+                          print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
                      else:
-                         print(f"  Warning: Unexpected type for vertex_colors: {type(vertex_colors)}. Using fallback gray.")
-                         colors_np = np.ones_like(verts_np) * 0.5 
-                     # --- End Safe Conversion ---
-                     save_obj(verts_np, faces_np, colors_np, output_obj_path)
+                         colors_np = safe_to_numpy(vertex_colors)
+                         if colors_np is None:
+                             print(f"  Warning: Failed to convert vertex_colors to NumPy. Using fallback gray.")
+                             colors_np = np.ones_like(verts_np) * 0.5
+                         save_obj(verts_np, faces_np, colors_np, output_obj_path)
                 else:
                      print("  Warning: Vertex colors expected but mesh output format unexpected. Saving without colors.")
                      # Handle cases where only vertices and faces might be returned
                      if len(mesh_out) == 2:
                           vertices, faces = mesh_out
-                          # --- Safely convert ALL components to NumPy --- 
-                          verts_np = np.asarray(vertices) if isinstance(vertices, memoryview) else (vertices.data.cpu().numpy() if hasattr(vertices, 'data') else np.array(vertices))
-                          faces_np = np.asarray(faces) if isinstance(faces, memoryview) else (faces.data.cpu().numpy() if hasattr(faces, 'data') else np.array(faces))
-                          dummy_colors = np.ones_like(verts_np) * 0.5 # Gray
-                          save_obj(verts_np, faces_np, dummy_colors, output_obj_path)
+                          # --- Use Safe Conversion Function --- 
+                          verts_np = safe_to_numpy(vertices)
+                          faces_np = safe_to_numpy(faces)
+                          
+                          if verts_np is None or faces_np is None:
+                               print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
+                          else:
+                              dummy_colors = np.ones_like(verts_np) * 0.5 # Gray
+                              save_obj(verts_np, faces_np, dummy_colors, output_obj_path)
                      else:
                           print(f"  Error: Unexpected number of items ({len(mesh_out)}) returned by extract_mesh. Cannot save OBJ.")
 
