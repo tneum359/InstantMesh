@@ -638,37 +638,52 @@ if __name__ == "__main__":
             args.no_rembg = True 
 
     # --- Batch or Single Image Processing ---
-    # (Keep the existing logic that calls process_image based on args.batch_mode
-    # and uses input_file_to_process_single for single mode)
     if args.batch_mode:
-        # Input path validity established above using is_effectively_input_dir
+        # --- Add Warning if Gemini isn't configured for batch mode ---
+        if not gemini_available_flag:
+            print("\nWarning: Batch mode is selected, but Gemini scoring is not available or enabled.")
+            print("         (Requires --num_candidates > 1 AND GEMINI_API_KEY to be set).")
+            print("         No processing will be performed in this run.")
+            # Optionally exit here, or let it proceed (currently proceeds and skips each image)
+            # exit(1) 
+
+        # --- Begin Batch Processing ---
         input_dir = args.input_path
-        # Use glob directly again here as it's more reliable with Drive mount issues
         all_images = sorted(glob(os.path.join(input_dir, '*.png')))
         if not all_images:
-             # Check again in case glob failed but subprocess didn't provide list
-             print(f"Error: No PNG images found in batch input directory via glob: {input_dir}. Subprocess check might have passed on empty dir.")
+             print(f"Error: No PNG images found in batch input directory via glob: {input_dir}.")
              exit(1)
-        print(f"--- Starting Batch Mode: Found {len(all_images)} PNG images in {input_dir} ---")
+        print(f"--- Starting Batch Mode (Gemini Pass Only): Found {len(all_images)} PNG images in {input_dir} ---")
         
-        for img_path in tqdm(all_images, desc="Processing Batch"): 
+        for img_path in tqdm(all_images, desc="Processing Batch (Gemini Pass)"): 
             img_name = os.path.splitext(os.path.basename(img_path))[0]
             intermediate_subdir = os.path.join(args.output_intermediate_path, f'data_{img_name}')
             output_subdir = os.path.join(args.output_3d_path, f'output_{img_name}')
             os.makedirs(intermediate_subdir, exist_ok=True)
             os.makedirs(output_subdir, exist_ok=True)
             
-            # Pass camera creation logic inside or handle it here if needed
-            process_image(args, config, model_config, infer_config, device, 
-                          pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
-                          img_path, intermediate_subdir, output_subdir, is_gemini_pass=False)
+            # --- Removed Pass 1 (No Gemini) ---
+            # process_image(args, config, model_config, infer_config, device, 
+            #               pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
+            #               img_path, intermediate_subdir, output_subdir, is_gemini_pass=False)
             
+            # --- Run Only Pass 2 (With Gemini, if available) ---
             if gemini_available_flag:
-                 process_image(args, config, model_config, infer_config, device, 
-                               pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
-                               img_path, intermediate_subdir, output_subdir, is_gemini_pass=True)
+                 print(f"\n[{img_name}] Processing Gemini Pass (from {img_path}) ...")
+                 try:
+                      process_image(args, config, model_config, infer_config, device, 
+                                    pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
+                                    img_path, intermediate_subdir, output_subdir, is_gemini_pass=True)
+                 except Exception as e:
+                      print(f"\n !!! UNHANDLED ERROR processing {img_name} (Gemini pass) !!!")
+                      print(f"Error: {e}")
+                      traceback.print_exc()
+                      print(f"  Skipping to next image due to error.")
             else:
-                 print(f"  [{img_name}] Skipping Gemini pass (verifier not available/enabled).")
+                 # This message will now appear if the warning at the start wasn't triggered 
+                 # (e.g., if API key exists but num_candidates=1 was somehow forced - less likely now)
+                 # Or if the loop continued despite the initial warning.
+                 print(f"  [{img_name}] Skipping: Gemini pass required but not available/enabled for this run.") 
 
         print("--- Batch processing complete. ---")
 
