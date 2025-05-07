@@ -268,8 +268,37 @@ def process_image(args, config, model_config, infer_config, device,
                         "original_image_b64": original_img_b64,
                         "candidate_views_b64": candidate_views_b64_list
                     }
-                    # ... (rest of Gemini scoring call and result processing) ...
-            # ... (rest of candidate loop: update best_group_*, etc.) ...
+                    print(f"    Scoring candidate group {candidate_idx + 1} with Gemini...")
+                    try:
+                        gemini_result = gemini_verifier.score(inputs=gemini_api_input_payload) 
+                        
+                        if gemini_result.get("success"):
+                            current_candidate_metadata = gemini_result.get("result")
+                            if current_candidate_metadata and isinstance(current_candidate_metadata.get('overall_score'), (int, float)):
+                                current_score = current_candidate_metadata['overall_score']
+                                print(f"    Gemini Score: {current_score:.4f}")
+                            else:
+                                print("    Warning: Gemini did not return a valid overall_score.")
+                                # current_candidate_metadata might still be useful even if overall_score is off
+                        else:
+                            print(f"    Warning: Gemini evaluation failed for candidate {candidate_idx + 1}: {gemini_result.get('error', 'Unknown error')}")
+                            if gemini_result.get('raw_response'):
+                                print(f"      Raw Gemini Response: {str(gemini_result['raw_response'])[:300]}...") 
+
+                    except Exception as e:
+                        print(f"    Error calling Gemini score method for candidate {candidate_idx + 1}: {e}")
+                        traceback.print_exc()
+            
+            # Check if this candidate is the best so far
+            if current_score > best_group_score or (not is_gemini_pass and candidate_idx == 0):
+                print(f"    New best group found (Score: {current_score:.4f}) Seed: {current_seed}")
+                best_group_score = current_score
+                best_group_seed = current_seed
+                best_group_images_tensor = images_tensor 
+                best_group_pil_grid_raw = output_image_pil_grid 
+                best_group_pil_list_processed_rgb = multiview_pil_list_nobg_rgb_current_candidate 
+                if is_gemini_pass and current_candidate_metadata: 
+                    best_candidate_metadata = current_candidate_metadata
 
         if best_group_images_tensor is None:
              print("  Error: No successful candidate group generated.")
