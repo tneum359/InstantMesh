@@ -26,10 +26,45 @@ import shutil
 # --- Add InstantMesh directory to sys.path ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(SCRIPT_DIR)
-INSTANT_MESH_DIR = SCRIPT_DIR  # This is the InstantMesh directory
 sys.path.append(PARENT_DIR)
-sys.path.append(INSTANT_MESH_DIR)  # Add InstantMesh dir to path
-print(f"--- DEBUG: Added {PARENT_DIR} and {INSTANT_MESH_DIR} to sys.path ---")
+sys.path.append(SCRIPT_DIR)
+print(f"--- DEBUG: Added {PARENT_DIR} and {SCRIPT_DIR} to sys.path ---")
+
+# Try different import paths
+try:
+    # Try direct import first (using symlink)
+    from utils.train_util import instantiate_from_config
+    from utils.camera_util import (
+        FOV_to_intrinsics, 
+        get_zero123plus_input_cameras,
+        get_circular_camera_poses,
+    )
+    from utils.mesh_util import save_obj, save_obj_with_mtl
+    from utils.infer_util import remove_background, resize_foreground
+    print("Successfully imported from utils (direct)")
+except ImportError:
+    try:
+        # Try with src prefix
+        from src.utils.train_util import instantiate_from_config
+        from src.utils.camera_util import (
+            FOV_to_intrinsics, 
+            get_zero123plus_input_cameras,
+            get_circular_camera_poses,
+        )
+        from src.utils.mesh_util import save_obj, save_obj_with_mtl
+        from src.utils.infer_util import remove_background, resize_foreground
+        print("Successfully imported from src.utils")
+    except ImportError as e:
+        print(f"Failed to import required modules. Error: {e}")
+        print(f"Current sys.path: {sys.path}")
+        print(f"Contents of {SCRIPT_DIR}:")
+        try:
+            print(os.listdir(SCRIPT_DIR))
+            print("\nContents of src/utils:")
+            print(os.listdir(os.path.join(SCRIPT_DIR, 'src', 'utils')))
+        except Exception as e:
+            print(f"Could not list directories: {e}")
+        raise
 
 # --- Local utils ---
 from InstantMesh.src.utils.train_util import instantiate_from_config
