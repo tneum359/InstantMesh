@@ -21,6 +21,7 @@ import traceback
 import subprocess # Import subprocess
 import base64
 from io import BytesIO
+import shutil # Added for rmtree
 
 # --- Add parent directory to sys.path ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -105,16 +106,31 @@ def process_image(args, config, model_config, infer_config, device,
                   pipeline, model, gemini_verifier, rembg_session, input_cameras,
                   input_image_path, intermediate_dir, output_dir, is_gemini_pass):
     """Processes a single image, optionally using Gemini."""
-    img_name = os.path.splitext(os.path.basename(input_image_path))[0]
+    img_name_base = os.path.splitext(os.path.basename(input_image_path))[0]
     num_candidates = args.num_candidates if is_gemini_pass else 1 # Use arg for Gemini pass, 1 otherwise
     use_gemini_this_pass = is_gemini_pass and (gemini_verifier is not None)
     
-    print(f'\n[{img_name}] Processing {"with Gemini" if is_gemini_pass else "no Gemini"} (from {input_image_path}) ...')
+    print(f'\n[{img_name_base}] Processing {"with Gemini" if is_gemini_pass else "no Gemini"} (from {input_image_path}) ...')
     print(f"  Intermediate outputs -> {intermediate_dir}")
     print(f"  Final 3D object -> {output_dir}")
 
+    # --- Clear intermediate directory if it's a Gemini pass and dir exists ---
+    if is_gemini_pass and os.path.exists(intermediate_dir):
+        print(f"  Clearing previous contents of intermediate directory: {intermediate_dir}")
+        for item_name in os.listdir(intermediate_dir):
+            item_path = os.path.join(intermediate_dir, item_name)
+            try:
+                if os.path.isfile(item_path) or os.path.islink(item_path):
+                    os.unlink(item_path)
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path) # Use shutil.rmtree for directories
+            except Exception as e:
+                print(f'    Failed to delete {item_path}. Reason: {e}')
+    # Ensure the intermediate_dir exists after potential cleaning (or for the first run)
+    os.makedirs(intermediate_dir, exist_ok=True)
+
     # --- Define output paths for this specific input/pass ---
-    base_obj_name = f'generation_{img_name}' # Temporary name before rename
+    base_obj_name = f'generation_{img_name_base}' # Temporary name before rename
     final_obj_name = 'obj_with_gemini.obj' if is_gemini_pass else 'obj_no_gemini.obj'
     output_obj_path = os.path.join(output_dir, base_obj_name) # Path before renaming
     final_output_obj_path = os.path.join(output_dir, final_obj_name)
@@ -144,8 +160,9 @@ def process_image(args, config, model_config, infer_config, device,
         best_group_seed = -1
         best_group_score = -float('inf')
         best_group_images_tensor = None
-        best_group_pil_grid = None
-        best_group_pil_list_rgb = None # Store the final RGB list for reconstruction
+        best_group_pil_grid_raw = None # Store the RAW grid from pipeline for the best candidate
+        best_group_pil_list_processed_rgb = None # Store the FINAL processed RGB list for the best candidate
+        best_candidate_metadata = None # To store Gemini scores for the best candidate
 
         # Create candidate groups (even if only 1)
         num_actual_candidates = 1 if not is_gemini_pass else args.num_candidates
@@ -181,34 +198,28 @@ def process_image(args, config, model_config, infer_config, device,
                     box = (col * sub_w, row * sub_h, (col + 1) * sub_w, (row + 1) * sub_h)
                     multiview_pil_list_raw.append(output_image_pil_grid.crop(box))
 
-            multiview_pil_list_nobg_rgb = [] # Store final RGB images
+            multiview_pil_list_nobg_rgb_current_candidate = []
+            multiview_pil_list_nobg_rgba_current_candidate = [] # For Gemini
+
             if not args.no_rembg and rembg_session is not None:
                 print(f"    Removing background from {len(multiview_pil_list_raw)} generated views...")
-                multiview_pil_list_nobg_rgba = []
                 for i, img_pil in enumerate(multiview_pil_list_raw):
                      try:
                           # Apply rembg
                           img_nobg_rgba = rembg.remove(img_pil, session=rembg_session)
-                          multiview_pil_list_nobg_rgba.append(img_nobg_rgba)
+                          multiview_pil_list_nobg_rgba_current_candidate.append(img_nobg_rgba)
+                          img_rgb_on_white = rgba_to_rgb_white(img_nobg_rgba)
+                          multiview_pil_list_nobg_rgb_current_candidate.append(img_rgb_on_white)
                      except Exception as rembg_err:
                           print(f"      Warning: rembg failed on view {i}: {rembg_err}. Using original view.")
                           # Fallback: use original if rembg fails
-                          multiview_pil_list_nobg_rgba.append(img_pil.convert("RGBA")) 
-                
-                # Composite RGBA on white background
-                for i, img_rgba in enumerate(multiview_pil_list_nobg_rgba):
-                     try:
-                          img_rgb_on_white = rgba_to_rgb_white(img_rgba)
-                          multiview_pil_list_nobg_rgb.append(img_rgb_on_white)
-                     except Exception as composite_err:
-                          print(f"      Warning: Compositing failed on view {i}: {composite_err}. Using original view.")
-                          # Fallback: use original converted to RGB if compositing fails
-                          multiview_pil_list_nobg_rgb.append(multiview_pil_list_raw[i].convert("RGB"))
+                          multiview_pil_list_nobg_rgba_current_candidate.append(img_pil.convert("RGBA")) 
+                          multiview_pil_list_nobg_rgb_current_candidate.append(img_pil.convert("RGB"))
             else:
                 # If rembg is disabled, just convert raw images to RGB
                 print(f"    Background removal on generated views skipped.")
                 for img_pil in multiview_pil_list_raw:
-                     multiview_pil_list_nobg_rgb.append(img_pil.convert("RGB"))
+                     multiview_pil_list_nobg_rgb_current_candidate.append(img_pil.convert("RGB"))
             # ---> END: Background Removal <--- 
 
             # --- Prepare TENSOR for reconstruction model (use multiview_pil_list_nobg_rgb) ---
@@ -217,7 +228,7 @@ def process_image(args, config, model_config, infer_config, device,
                 v2.ToTensor(), # Converts PIL to Tensor [C, H, W] in [0, 1]
             ])
             try:
-                images_tensor_list = [transform(img) for img in multiview_pil_list_nobg_rgb]
+                images_tensor_list = [transform(img) for img in multiview_pil_list_nobg_rgb_current_candidate]
                 images_tensor = torch.stack(images_tensor_list) # [6, C, H, W]
                 images_tensor = images_tensor.unsqueeze(0).to(device) # [B, V, C, H, W], B=1, V=6
                 # Resize for the reconstruction model input
@@ -230,10 +241,10 @@ def process_image(args, config, model_config, infer_config, device,
             # --- End Tensor Prep ---
 
             current_score = 0.0
-            candidate_metadata = None
+            current_candidate_metadata = None
             # Evaluate with Gemini only in the Gemini pass
             if is_gemini_pass and gemini_verifier is not None:
-                images_pil_for_gemini_candidates = multiview_pil_list_nobg_rgba if (not args.no_rembg and rembg_session is not None) else [img.convert("RGBA") for img in multiview_pil_list_raw]
+                images_pil_for_gemini_candidates = multiview_pil_list_nobg_rgba_current_candidate if (not args.no_rembg and rembg_session is not None) else [img.convert("RGBA") for img in multiview_pil_list_raw]
                 
                 print(f"    Preparing data for Gemini scoring (Original + Candidate Set {candidate_idx + 1})...")
                 # --- Prepare original input image (ensure it's the one used for diffusion) ---
@@ -270,13 +281,13 @@ def process_image(args, config, model_config, infer_config, device,
                         gemini_result = gemini_verifier.score(inputs=gemini_api_input_payload) 
                         
                         if gemini_result.get("success"):
-                            candidate_metadata = gemini_result.get("result")
-                            if candidate_metadata and isinstance(candidate_metadata.get('overall_score'), (int, float)):
-                                current_score = candidate_metadata['overall_score']
+                            current_candidate_metadata = gemini_result.get("result")
+                            if current_candidate_metadata and isinstance(current_candidate_metadata.get('overall_score'), (int, float)):
+                                current_score = current_candidate_metadata['overall_score']
                                 print(f"    Gemini Score: {current_score:.4f}")
                             else:
                                 print("    Warning: Gemini did not return a valid overall_score.")
-                                # candidate_metadata might still be useful even if overall_score is off
+                                # current_candidate_metadata might still be useful even if overall_score is off
                         else:
                             print(f"    Warning: Gemini evaluation failed for candidate {candidate_idx + 1}: {gemini_result.get('error', 'Unknown error')}")
                             if gemini_result.get('raw_response'):
@@ -289,70 +300,61 @@ def process_image(args, config, model_config, infer_config, device,
                  # If not Gemini pass, score is 0, use first candidate
                  pass
 
-            # Save intermediate images for this candidate *only* in Gemini pass
-            if is_gemini_pass:
-                candidate_subdir = os.path.join(intermediate_dir, f'candidate_{candidate_idx+1}_seed_{current_seed}')
-                os.makedirs(candidate_subdir, exist_ok=True)
-                output_image_pil_grid.save(os.path.join(candidate_subdir, 'multiview_grid_raw.png'))
-                # Save the background-removed RGB versions used for reconstruction
-                for i, img in enumerate(multiview_pil_list_nobg_rgb):
-                     img.save(os.path.join(candidate_subdir, f'view_{i}_nobg_rgb.png'))
-                if candidate_metadata:
-                    meta_path = os.path.join(candidate_subdir, 'gemini_scores.json')
-                    try:
-                        with open(meta_path, 'w') as f:
-                            json.dump(candidate_metadata, f, indent=4)
-                    except Exception as e:
-                        print(f"  Warning: Failed to save Gemini metadata: {e}")
-
             # Check if this candidate is the best so far
-            if current_score > best_group_score:
+            if current_score > best_group_score or (not is_gemini_pass and candidate_idx == 0): # In no-Gemini, first is best
                 print(f"    New best group found (Score: {current_score:.4f}) Seed: {current_seed}")
                 best_group_score = current_score
                 best_group_seed = current_seed
                 best_group_images_tensor = images_tensor # Use the processed tensor
-                best_group_pil_grid = output_image_pil_grid # Save the raw grid for reference
-                best_group_pil_list_rgb = multiview_pil_list_nobg_rgb # Save the final list used
+                best_group_pil_grid_raw = output_image_pil_grid # Save the raw grid for reference
+                best_group_pil_list_processed_rgb = multiview_pil_list_nobg_rgb_current_candidate # Save the final list used
+                if is_gemini_pass: # Only store metadata if it was a Gemini pass that produced it
+                    best_candidate_metadata = current_candidate_metadata
         # --- End Candidate Loop ---
 
         if best_group_images_tensor is None:
              print("  Error: No successful candidate group generated.")
              raise RuntimeError("Failed to generate any valid candidate group.")
 
-        print(f"  Selected best group for {img_name} (Seed: {best_group_seed}, Score: {best_group_score:.4f})")
+        print(f"  Selected best group for {img_name_base} (Seed: {best_group_seed}, Score: {best_group_score:.4f})")
 
-        # --- Save Intermediate Outputs for the Best Group --- 
-        # Save the chosen best raw grid image (optional, maybe comment out if not needed)
-        # best_grid_raw_path = os.path.join(intermediate_dir, f'best_multiview_grid_raw_seed_{best_group_seed}.png')
-        # if best_group_pil_grid:
-        #      best_group_pil_grid.save(best_grid_raw_path)
-        #      print(f"  Saved best candidate raw grid to {best_grid_raw_path}")
+        # --- Save Intermediate Outputs ONLY FOR THE BEST Group --- 
+        # (Directly into intermediate_dir, which was cleaned if is_gemini_pass)
+        if best_group_pil_list_processed_rgb:
+            # Save individual processed views of the best candidate
+            for i, img in enumerate(best_group_pil_list_processed_rgb):
+                img.save(os.path.join(intermediate_dir, f'best_view_processed_{i}.png'))
+            print(f"  Saved best candidate processed views to {intermediate_dir}")
 
-        # Save the chosen best processed RGB list to the main intermediate dir
-        if best_group_pil_list_rgb:
-             best_list_dir = os.path.join(intermediate_dir, f'best_views_nobg_rgb_seed_{best_group_seed}')
-             os.makedirs(best_list_dir, exist_ok=True)
-             for i, img in enumerate(best_group_pil_list_rgb):
-                  img.save(os.path.join(best_list_dir, f'view_{i}.png'))
-             print(f"  Saved best candidate processed views to {best_list_dir}")
+            # Create and Save Processed Grid of the best candidate
+            try:
+                transform_to_tensor = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
+                tensors_for_grid = [transform_to_tensor(img) for img in best_group_pil_list_processed_rgb]
+                if tensors_for_grid:
+                    processed_grid_tensor = make_grid(tensors_for_grid, nrow=2)
+                    processed_grid_pil = F.to_pil_image(processed_grid_tensor)
+                    processed_grid_path = os.path.join(intermediate_dir, f'best_multiview_grid_processed_seed_{best_group_seed}.png')
+                    processed_grid_pil.save(processed_grid_path)
+                    print(f"  Saved best candidate processed grid to {processed_grid_path}")
+            except Exception as e:
+                print(f"  Warning: Failed to create or save processed grid for best candidate: {e}")
+        
+        # Save the RAW grid from the diffusion model for the best candidate (optional)
+        if best_group_pil_grid_raw:
+            raw_grid_path = os.path.join(intermediate_dir, f'best_multiview_grid_raw_seed_{best_group_seed}.png')
+            best_group_pil_grid_raw.save(raw_grid_path)
+            print(f"  Saved best candidate RAW grid to {raw_grid_path}")
 
-             # --- Create and Save Processed Grid --- 
-             try:
-                  # Convert the processed PIL list back to tensors to use make_grid
-                  transform_to_tensor = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]) # Use ToImage for PIL
-                  tensors_for_grid = [transform_to_tensor(img) for img in best_group_pil_list_rgb]
-                  if tensors_for_grid:
-                       processed_grid_tensor = make_grid(tensors_for_grid, nrow=2) # Arrange in 2 columns
-                       processed_grid_pil = F.to_pil_image(processed_grid_tensor)
-                       processed_grid_path = os.path.join(intermediate_dir, f'best_multiview_grid_processed_seed_{best_group_seed}.png')
-                       processed_grid_pil.save(processed_grid_path)
-                       print(f"  Saved best candidate processed grid to {processed_grid_path}")
-                  else:
-                       print("  Warning: No processed images available to create processed grid.")
-             except Exception as e:
-                  print(f"  Warning: Failed to create or save processed grid: {e}")
-                  traceback.print_exc()
-             # --- End Processed Grid Saving ---
+        # Save Gemini scores for the best candidate if it was a Gemini pass and metadata exists
+        if is_gemini_pass and best_candidate_metadata:
+            best_meta_path = os.path.join(intermediate_dir, f'gemini_scores_best_seed_{best_group_seed}.json')
+            try:
+                with open(best_meta_path, 'w') as f:
+                    json.dump(best_candidate_metadata, f, indent=4)
+                print(f"  Saved best candidate's Gemini scores to {best_meta_path}")
+            except Exception as e:
+                print(f"  Warning: Failed to save best candidate's Gemini metadata: {e}")
+        # --- End Intermediate Saving for Best --- 
 
         # --- Reconstruction Step (using best_group_images_tensor) ---
         print("  Starting reconstruction...")
@@ -462,7 +464,7 @@ def process_image(args, config, model_config, infer_config, device,
                  print(f"  Warning: Mesh file {output_obj_path} not found after saving.")
 
     except Exception as e:
-        print(f"\n !!! UNHANDLED ERROR processing {img_name} ({'Gemini pass' if is_gemini_pass else 'No Gemini pass'}) !!!")
+        print(f"\n !!! UNHANDLED ERROR processing {img_name_base} ({'Gemini pass' if is_gemini_pass else 'No Gemini pass'}) !!!")
         print(f"Error: {e}")
         traceback.print_exc()
 
