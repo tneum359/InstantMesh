@@ -18,26 +18,28 @@ from torchvision.utils import make_grid
 import json
 import random
 import traceback
-import subprocess # Import subprocess
+import subprocess
 import base64
 from io import BytesIO
-import shutil # Added for rmtree
+import shutil
 
-# --- Add parent directory to sys.path ---
+# --- Add InstantMesh directory to sys.path ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(SCRIPT_DIR)
+INSTANT_MESH_DIR = SCRIPT_DIR  # This is the InstantMesh directory
 sys.path.append(PARENT_DIR)
-print(f"--- DEBUG: Added {PARENT_DIR} to sys.path ---")
+sys.path.append(INSTANT_MESH_DIR)  # Add InstantMesh dir to path
+print(f"--- DEBUG: Added {PARENT_DIR} and {INSTANT_MESH_DIR} to sys.path ---")
 
 # --- Local utils ---
-from src.utils.train_util import instantiate_from_config
-from src.utils.camera_util import (
+from InstantMesh.src.utils.train_util import instantiate_from_config
+from InstantMesh.src.utils.camera_util import (
     FOV_to_intrinsics, 
     get_zero123plus_input_cameras,
     get_circular_camera_poses,
 )
-from src.utils.mesh_util import save_obj, save_obj_with_mtl
-from src.utils.infer_util import remove_background, resize_foreground
+from InstantMesh.src.utils.mesh_util import save_obj, save_obj_with_mtl
+from InstantMesh.src.utils.infer_util import remove_background, resize_foreground
 
 # --- Helper: Composite RGBA over white ---
 def rgba_to_rgb_white(img):
