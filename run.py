@@ -268,12 +268,12 @@ def process_image(args, config, model_config, infer_config, device,
             # input_tensor = torch.from_numpy(np.array(input_image_for_pipeline)).permute(2, 0, 1).float() / 255.0
             # input_tensor = input_tensor.unsqueeze(0).to(device=device, dtype=torch.float16)
             
-            # Temporarily disable autocast to see if it resolves the conflict
-            # with torch.cuda.amp.autocast(): # type: ignore
-            output_image = pipeline(
-                input_image_for_pipeline, # Pass the PIL image directly
-                num_inference_steps=args.diffusion_steps,
-            ).images[0]
+            # Re-enable autocast
+            with torch.cuda.amp.autocast(): # type: ignore <-- Re-enabled
+                output_image = pipeline(
+                    input_image_for_pipeline, # Pass the PIL image directly
+                    num_inference_steps=args.diffusion_steps,
+                ).images[0]
 
             # Save the grid image
             output_image.save(os.path.join(intermediate_dir, f'candidate_{candidate_count}_seed_{candidate_seed}.png'))
@@ -622,10 +622,10 @@ if __name__ == "__main__":
     pipeline = None
     try:
         print('Loading diffusion model ...')
-        # Replicate original loading: short custom_pipeline name, float16 hint
+        # Use full custom name and float16 hint
         pipeline = DiffusionPipeline.from_pretrained(
             "sudo-ai/zero123plus-v1.2", 
-            custom_pipeline="zero123plus", # Use short name like original
+            custom_pipeline="sudo-ai/zero123plus-pipeline", # Full name
             torch_dtype=torch.float16, 
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
@@ -654,8 +654,8 @@ if __name__ == "__main__":
         pipeline = pipeline.to(device)
         print("Pipeline moved to device.")
 
-        # Mimic original: No explicit .half() or param iteration after moving to device
-        print("Pipeline components processed for device (following original logic).")
+        # REMOVED explicit .half() / param loops - Relying on autocast
+        print("Pipeline components processed for device (relying on float16 hint + autocast).")
 
         # Enable memory optimizations (These seem fine to keep)
         if hasattr(pipeline, 'enable_attention_slicing'):
