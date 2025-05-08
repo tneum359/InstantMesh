@@ -49,14 +49,14 @@ try:
 except ImportError:
     try:
         # Try with src prefix
-        from src.utils.train_util import instantiate_from_config
-        from src.utils.camera_util import (
-            FOV_to_intrinsics, 
-            get_zero123plus_input_cameras,
-            get_circular_camera_poses,
-        )
-        from src.utils.mesh_util import save_obj, save_obj_with_mtl
-        from src.utils.infer_util import remove_background, resize_foreground, save_video
+from src.utils.train_util import instantiate_from_config
+from src.utils.camera_util import (
+    FOV_to_intrinsics, 
+    get_zero123plus_input_cameras,
+    get_circular_camera_poses,
+)
+from src.utils.mesh_util import save_obj, save_obj_with_mtl
+from src.utils.infer_util import remove_background, resize_foreground, save_video
         print("Successfully imported from src.utils")
     except ImportError as e:
         print(f"Failed to import required modules. Error: {e}")
@@ -260,10 +260,15 @@ def process_image(args, config, model_config, infer_config, device,
             random.seed(candidate_seed)
 
             # Generate multiview images
-            output_image = pipeline(
-                input_image_for_pipeline, 
-                num_inference_steps=args.diffusion_steps, 
-            ).images[0]
+            # Convert input image to tensor and ensure correct device/dtype
+            input_tensor = torch.from_numpy(np.array(input_image_for_pipeline)).permute(2, 0, 1).float() / 255.0
+            input_tensor = input_tensor.unsqueeze(0).to(device=device, dtype=torch.float16)
+            
+            with torch.cuda.amp.autocast():
+                output_image = pipeline(
+                    input_tensor,
+                    num_inference_steps=args.diffusion_steps,
+                ).images[0]
 
             # Save the grid image
             output_image.save(os.path.join(intermediate_dir, f'candidate_{candidate_count}_seed_{candidate_seed}.png'))
@@ -440,7 +445,7 @@ def process_image(args, config, model_config, infer_config, device,
 
                     if verts_np is None or faces_np is None or colors_np is None:
                         print(f"  Error: Failed to convert one or more mesh components to NumPy. Cannot save OBJ.")
-                    else:
+        else:
                         # Handle potential shape mismatch if color conversion failed differently
                         if colors_np.shape[0] != verts_np.shape[0]:
                              print(f"  Warning: Vertex and color array lengths mismatch ({verts_np.shape[0]} vs {colors_np.shape[0]}). Using fallback gray.")
@@ -502,18 +507,18 @@ def process_image(args, config, model_config, infer_config, device,
 
 # --- Main Execution Logic ---
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('config', type=str, help='Path to config file.')
+parser = argparse.ArgumentParser()
+parser.add_argument('config', type=str, help='Path to config file.')
     parser.add_argument('--input_path', type=str, required=True, help='Path to input image or directory.')
     parser.add_argument('--output_intermediate_path', type=str, default='outputs/intermediate_images', help='Base directory for intermediate outputs.')
     parser.add_argument('--output_3d_path', type=str, default='outputs/output_3d', help='Base directory for final 3D outputs.')
-    parser.add_argument('--diffusion_steps', type=int, default=75, help='Denoising Sampling steps.')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed for sampling.')
-    parser.add_argument('--scale', type=float, default=1.0, help='Scale of generated object.')
-    parser.add_argument('--distance', type=float, default=4.5, help='Render distance.')
+parser.add_argument('--diffusion_steps', type=int, default=75, help='Denoising Sampling steps.')
+parser.add_argument('--seed', type=int, default=42, help='Random seed for sampling.')
+parser.add_argument('--scale', type=float, default=1.0, help='Scale of generated object.')
+parser.add_argument('--distance', type=float, default=4.5, help='Render distance.')
     parser.add_argument('--view', type=int, default=6, choices=[4, 6], help='Number of views for reconstruction.')
-    parser.add_argument('--no_rembg', action='store_true', help='Do not remove input background.')
-    parser.add_argument('--export_texmap', action='store_true', help='Export a mesh with texture map.')
+parser.add_argument('--no_rembg', action='store_true', help='Do not remove input background.')
+parser.add_argument('--export_texmap', action='store_true', help='Export a mesh with texture map.')
     parser.add_argument('--save_video', action='store_true', help='Save a circular-view video (Not fully supported in batch mode).')
     parser.add_argument('--num_candidates', type=int, default=8, help='Maximum number of candidates to generate.')
     parser.add_argument('--min_candidates', type=int, default=3, help='Minimum number of candidates to generate.')
@@ -522,21 +527,21 @@ if __name__ == "__main__":
     parser.add_argument('--gen_width', type=int, default=640, help='Width for multiview generation.')
     parser.add_argument('--gen_height', type=int, default=960, help='Height for multiview generation.')
     parser.add_argument('--batch_mode', action='store_true', help='Process all PNGs in input_path directory.')
-    args = parser.parse_args()
+args = parser.parse_args()
 
     # --- Basic Setup ---
     print("--- Initializing Models and Environment ---")
     seed_everything(args.seed)
     try:
-        config = OmegaConf.load(args.config)
-        config_name = os.path.basename(args.config).replace('.yaml', '')
-        model_config = config.model_config
-        infer_config = config.infer_config
+config = OmegaConf.load(args.config)
+config_name = os.path.basename(args.config).replace('.yaml', '')
+model_config = config.model_config
+infer_config = config.infer_config
     except Exception as e:
         print(f"Error loading config file {args.config}: {e}")
         exit(1)
-        
-    IS_FLEXICUBES = True if config_name.startswith('instant-mesh') else False
+
+IS_FLEXICUBES = True if config_name.startswith('instant-mesh') else False
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -613,37 +618,43 @@ if __name__ == "__main__":
     # --- Load models (Diffusion, UNet, Recon) --- 
     pipeline = None
     try:
-        print('Loading diffusion model ...')
-        pipeline = DiffusionPipeline.from_pretrained(
-            "sudo-ai/zero123plus-v1.2", 
-            custom_pipeline="sudo-ai/zero123plus-pipeline",
-            torch_dtype=torch.float16,
-        )
-        pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-            pipeline.scheduler.config, timestep_spacing='trailing'
-        )
-        print('Loading custom white-background unet ...')
+print('Loading diffusion model ...')
+pipeline = DiffusionPipeline.from_pretrained(
+    "sudo-ai/zero123plus-v1.2", 
+    custom_pipeline="sudo-ai/zero123plus-pipeline",
+    torch_dtype=torch.float16,
+)
+pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
+    pipeline.scheduler.config, timestep_spacing='trailing'
+)
+
+# Move all pipeline components to device and ensure consistent dtype
+pipeline = pipeline.to(device)
+pipeline.unet = pipeline.unet.to(device)
+pipeline.vae = pipeline.vae.to(device)
+pipeline.vision_encoder = pipeline.vision_encoder.to(device)
+
+# Ensure all components use float16
+pipeline.unet = pipeline.unet.half()
+pipeline.vae = pipeline.vae.half()
+pipeline.vision_encoder = pipeline.vision_encoder.half()
+
+print('Loading custom white-background unet ...')
         # Try finding UNet relative to script parent first, then config path, then download
         unet_path_rel = os.path.join(PARENT_DIR, "ckpts", "diffusion_pytorch_model.bin") 
-        if os.path.exists(infer_config.unet_path):
+if os.path.exists(infer_config.unet_path):
              unet_ckpt_path = infer_config.unet_path # Allow override from config
              print(f"  Using UNet from config: {unet_ckpt_path}")
         elif os.path.exists(unet_path_rel):
              unet_ckpt_path = unet_path_rel
              print(f"  Using local UNet: {unet_ckpt_path}")
-        else:
+else:
             print(f"Custom UNet not found locally, downloading...")
-            unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
+    unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
         
-        state_dict = torch.load(unet_ckpt_path, map_location='cpu')
-        pipeline.unet.load_state_dict(state_dict, strict=True)
-        
-        # Move pipeline to device and ensure consistent dtype
-        pipeline = pipeline.to(device)
-        pipeline.unet = pipeline.unet.to(device)
-        pipeline.vae = pipeline.vae.to(device)
-        pipeline.vision_encoder = pipeline.vision_encoder.to(device)
-        
+state_dict = torch.load(unet_ckpt_path, map_location='cpu')
+pipeline.unet.load_state_dict(state_dict, strict=True)
+
         # Enable memory optimizations for diffusion pipeline
         if hasattr(pipeline, 'enable_attention_slicing'):
             pipeline.enable_attention_slicing()
@@ -682,8 +693,8 @@ if __name__ == "__main__":
     # ... (Load Reconstruction Model) ...
     model = None
     try:
-        print('Loading reconstruction model ...')
-        model = instantiate_from_config(model_config)
+print('Loading reconstruction model ...')
+model = instantiate_from_config(model_config)
         model_ckpt_filename = f"{config_name.replace('-', '_')}.ckpt"
         # Try finding model relative to script parent first, then config path, then download
         model_path_rel = os.path.join(PARENT_DIR, "ckpts", model_ckpt_filename) 
@@ -693,27 +704,27 @@ if __name__ == "__main__":
         elif os.path.exists(model_path_rel):
              model_ckpt_path = model_path_rel
              print(f"  Using local Recon Model: {model_ckpt_path}")
-        else:
+else:
             print(f"Reconstruction model not found locally, downloading...")
             model_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename=model_ckpt_filename, repo_type="model")
         
-        state_dict = torch.load(model_ckpt_path, map_location='cpu')['state_dict']
+state_dict = torch.load(model_ckpt_path, map_location='cpu')['state_dict']
         state_dict = {k[14:]: v for k, v in state_dict.items() if k.startswith('lrm_generator.') and 'renderer' not in k}
         model.load_state_dict(state_dict, strict=False)
         
         # Enable memory optimizations for reconstruction model
         if hasattr(model, 'encoder') and hasattr(model.encoder, 'gradient_checkpointing_enable'):
             model.encoder.gradient_checkpointing_enable()
-        
-        model = model.to(device)
-        if IS_FLEXICUBES:
+
+model = model.to(device)
+if IS_FLEXICUBES:
             # Check if geometry needs initialization
             if hasattr(model, 'init_flexicubes_geometry'): 
-                 model.init_flexicubes_geometry(device, fovy=30.0)
+    model.init_flexicubes_geometry(device, fovy=30.0)
             else:
                  print("Warning: Model does not have init_flexicubes_geometry method.")
-        model = model.eval()
-        
+model = model.eval()
+
         # Clear CUDA cache after model loading
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -724,7 +735,7 @@ if __name__ == "__main__":
         print(f"Error loading reconstruction model: {e}")
         traceback.print_exc()
         exit(1)
-        
+
     # ... (Define Rembg Session) ...
     rembg_session = None
     if not args.no_rembg:
@@ -772,12 +783,12 @@ if __name__ == "__main__":
                       process_image(args, config, model_config, infer_config, device, 
                                     pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
                                     img_path, intermediate_subdir, output_subdir, is_gemini_pass=True)
-                 except Exception as e:
+        except Exception as e:
                       print(f"\n !!! UNHANDLED ERROR processing {img_name} (Gemini pass) !!!")
                       print(f"Error: {e}")
                       traceback.print_exc()
                       print(f"  Skipping to next image due to error.")
-            else:
+                else:
                  # This message will now appear if the warning at the start wasn't triggered 
                  # (e.g., if API key exists but num_candidates=1 was somehow forced - less likely now)
                  # Or if the loop continued despite the initial warning.
@@ -808,4 +819,4 @@ if __name__ == "__main__":
 
         print("--- Single image processing complete. ---")
 
-    print("\n--- Script Finished ---")
+print("\n--- Script Finished ---")
