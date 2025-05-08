@@ -85,6 +85,36 @@ def rgba_to_rgb_white(img):
     else:
         return img.convert('RGB')
 
+# --- Helper: Create image grid ---
+def create_image_grid(images, rows=3, cols=2):
+    """Create a grid of images.
+    
+    Args:
+        images: List of numpy arrays (images)
+        rows: Number of rows in the grid
+        cols: Number of columns in the grid
+        
+    Returns:
+        numpy array containing the grid image
+    """
+    if not images:
+        return None
+        
+    # Get dimensions of first image
+    h, w = images[0].shape[:2]
+    
+    # Create empty grid
+    grid = np.zeros((h * rows, w * cols, 3), dtype=np.uint8)
+    
+    # Fill grid with images
+    for idx, img in enumerate(images):
+        if idx >= rows * cols:
+            break
+        i, j = idx // cols, idx % cols
+        grid[i*h:(i+1)*h, j*w:(j+1)*w] = img[:, :, :3]  # Ensure RGB
+        
+    return grid
+
 # --- Helper: Camera function (assuming it's needed globally or passed) ---
 def get_render_cameras(batch_size=1, M=120, radius=4.0, elevation=20.0, is_flexicubes=False):
     c2ws = get_circular_camera_poses(M=M, radius=radius, elevation=elevation)
