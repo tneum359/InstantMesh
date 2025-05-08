@@ -621,10 +621,11 @@ if __name__ == "__main__":
     pipeline = None
     try:
         print('Loading diffusion model ...')
-        # Load the pipeline, preferably in float16 from the start
+        # Load the pipeline, explicitly requesting fp16 variant and float16 dtype
         pipeline = DiffusionPipeline.from_pretrained(
             "sudo-ai/zero123plus-v1.2", 
             custom_pipeline="sudo-ai/zero123plus-pipeline",
+            variant="fp16",  # Request fp16 variant if available
             torch_dtype=torch.float16, 
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
@@ -644,38 +645,21 @@ if __name__ == "__main__":
             print(f"Custom UNet not found locally, downloading...")
             unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
         
-        # Load custom UNet weights onto the pipeline's UNet (which might be on CPU initially)
+        # Load custom UNet weights. Ensure the unet is in a compatible state (e.g., CPU, float32) before loading.
+        # pipeline.unet should already be float16 if torch_dtype worked, but loading from a float32 checkpoint is fine.
         state_dict = torch.load(unet_ckpt_path, map_location='cpu') 
-        pipeline.unet.load_state_dict(state_dict, strict=True)
+        pipeline.unet.load_state_dict(state_dict, strict=True) # Load onto the existing unet
         print("Custom UNet weights loaded.")
 
-        # Now, move the entire pipeline and its main components to the target device and set to half precision.
-        pipeline = pipeline.to(device) # Move the whole pipeline first
-
-        # Explicitly ensure UNet is on device and in half precision
-        if hasattr(pipeline, 'unet') and pipeline.unet is not None:
-            pipeline.unet.to(device).half()
-            for param in pipeline.unet.parameters():
-                 param.data = param.data.to(device).half()
-            print("UNet parameters moved and set to half.")
-
-        # Force VAE and its parameters to device and half precision
-        if hasattr(pipeline, 'vae') and pipeline.vae is not None:
-            pipeline.vae = pipeline.vae.to(device).half() # Move the module itself
-            # Iterate over parameters for VAE and explicitly move them
-            for param in pipeline.vae.parameters():
-               param.data = param.data.to(device).half()
-            print("VAE and its parameters forced to device and half precision.")
-
-        # Force Vision Encoder and its parameters to device and half precision
-        if hasattr(pipeline, 'vision_encoder') and pipeline.vision_encoder is not None:
-            pipeline.vision_encoder = pipeline.vision_encoder.to(device).half() # Move the module itself
-            # Iterate over parameters for Vision Encoder and explicitly move them
-            for param in pipeline.vision_encoder.parameters():
-               param.data = param.data.to(device).half()
-            print("Vision Encoder and its parameters forced to device and half precision.")
+        # Move the entire pipeline to the target device.
+        # The torch_dtype=torch.float16 should have handled component dtypes.
+        pipeline = pipeline.to(device)
+        print("Pipeline moved to device.")
         
-        print("Pipeline and critical components processed for device and dtype.")
+        # Optional: Verify dtypes of major components if errors persist
+        # if hasattr(pipeline, 'unet'): print(f"UNet dtype: {pipeline.unet.dtype}, device: {next(pipeline.unet.parameters()).device}")
+        # if hasattr(pipeline, 'vae'): print(f"VAE dtype: {pipeline.vae.dtype}, device: {next(pipeline.vae.parameters()).device}")
+        # if hasattr(pipeline, 'vision_encoder'): print(f"Vision Encoder dtype: {pipeline.vision_encoder.dtype}, device: {next(pipeline.vision_encoder.parameters()).device}")
 
         # Enable memory optimizations for diffusion pipeline
         if hasattr(pipeline, 'enable_attention_slicing'):
