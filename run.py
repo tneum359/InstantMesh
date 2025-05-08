@@ -22,6 +22,9 @@ import subprocess
 import base64
 from io import BytesIO
 import shutil
+
+# Add parent directory to Python path to find verifiers module
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from verifiers.gemini_verifier import GeminiVerifier
 
 # --- Add InstantMesh directory to sys.path ---
