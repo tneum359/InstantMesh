@@ -622,18 +622,18 @@ if __name__ == "__main__":
     pipeline = None
     try:
         print('Loading diffusion model ...')
-        # Load the pipeline using full custom pipeline name and float16 hint
+        # Replicate original loading: short custom_pipeline name, float16 hint
         pipeline = DiffusionPipeline.from_pretrained(
             "sudo-ai/zero123plus-v1.2", 
-            custom_pipeline="sudo-ai/zero123plus-pipeline", # Changed back to full name
-            torch_dtype=torch.float16, # Re-added float16 hint
+            custom_pipeline="zero123plus", # Use short name like original
+            torch_dtype=torch.float16, 
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
             pipeline.scheduler.config, timestep_spacing='trailing'
         )
 
         print('Loading custom white-background unet ...')
-        # Try finding UNet relative to script parent first, then config path, then download
+        # (UNet path finding logic remains the same)
         unet_path_rel = os.path.join(PARENT_DIR, "ckpts", "diffusion_pytorch_model.bin") 
         if os.path.exists(infer_config.unet_path):
             unet_ckpt_path = infer_config.unet_path 
@@ -645,38 +645,19 @@ if __name__ == "__main__":
             print(f"Custom UNet not found locally, downloading...")
             unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
         
-        # Load custom UNet weights onto the CPU UNet
+        # Load custom UNet weights onto the CPU UNet (as in original)
         state_dict = torch.load(unet_ckpt_path, map_location='cpu') 
-        # Ensure UNet is compatible before loading state_dict (should be float16 on CPU here if hint worked)
         pipeline.unet.load_state_dict(state_dict, strict=True) 
         print("Custom UNet weights loaded.")
 
-        # Move the entire pipeline to the target device first.
+        # Move the entire pipeline to the target device (as in original)
         pipeline = pipeline.to(device)
         print("Pipeline moved to device.")
 
-        # Explicitly set components to half and force parameters
-        if hasattr(pipeline, 'unet') and pipeline.unet is not None:
-            pipeline.unet.half() # Convert module to half
-            for param in pipeline.unet.parameters():
-                param.data = param.data.to(device).half() # Force params
-            print("UNet set to half and parameters forced.")
+        # Mimic original: No explicit .half() or param iteration after moving to device
+        print("Pipeline components processed for device (following original logic).")
 
-        if hasattr(pipeline, 'vae') and pipeline.vae is not None:
-            pipeline.vae.half() # Convert module to half
-            for param in pipeline.vae.parameters():
-               param.data = param.data.to(device).half() # Force params
-            print("VAE set to half and parameters forced.")
-
-        if hasattr(pipeline, 'vision_encoder') and pipeline.vision_encoder is not None:
-            pipeline.vision_encoder.half() # Convert module to half
-            for param in pipeline.vision_encoder.parameters():
-               param.data = param.data.to(device).half() # Force params
-            print("Vision Encoder set to half and parameters forced.")
-        
-        print("Pipeline components processed for device and dtype.")
-
-        # Enable memory optimizations for diffusion pipeline
+        # Enable memory optimizations (These seem fine to keep)
         if hasattr(pipeline, 'enable_attention_slicing'):
             pipeline.enable_attention_slicing()
         if hasattr(pipeline, 'enable_vae_slicing'):
