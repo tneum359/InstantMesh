@@ -650,16 +650,32 @@ if __name__ == "__main__":
         print("Custom UNet weights loaded.")
 
         # Now, move the entire pipeline and its main components to the target device and set to half precision.
-        # This should cover all sub-modules as well.
-        pipeline = pipeline.to(device)
+        pipeline = pipeline.to(device) # Move the whole pipeline first
+
+        # Explicitly ensure UNet is on device and in half precision
         if hasattr(pipeline, 'unet') and pipeline.unet is not None:
             pipeline.unet.to(device).half()
+            # for param in pipeline.unet.parameters():
+            #     param.data = param.data.to(device).half()
+            # print("UNet parameters moved and set to half.")
+
+        # Force VAE and its parameters to device and half precision
         if hasattr(pipeline, 'vae') and pipeline.vae is not None:
-            pipeline.vae.to(device).half()
+            pipeline.vae = pipeline.vae.to(device).half() # Move the module itself
+            # Iterate over parameters for VAE and explicitly move them
+            # for param in pipeline.vae.parameters():
+            #    param.data = param.data.to(device).half()
+            # print("VAE and its parameters forced to device and half precision.")
+
+        # Force Vision Encoder and its parameters to device and half precision
         if hasattr(pipeline, 'vision_encoder') and pipeline.vision_encoder is not None:
-            pipeline.vision_encoder.to(device).half()
+            pipeline.vision_encoder = pipeline.vision_encoder.to(device).half() # Move the module itself
+            # Iterate over parameters for Vision Encoder and explicitly move them
+            # for param in pipeline.vision_encoder.parameters():
+            #    param.data = param.data.to(device).half()
+            # print("Vision Encoder and its parameters forced to device and half precision.")
         
-        print("Pipeline and components moved to device and set to half precision.")
+        print("Pipeline and critical components processed for device and dtype.")
 
         # Enable memory optimizations for diffusion pipeline
         if hasattr(pipeline, 'enable_attention_slicing'):
