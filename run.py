@@ -328,7 +328,12 @@ def process_image(args, config, model_config, infer_config, device,
             if gemini_verifier is not None:
                 print("    Preparing data for Gemini scoring (Original + Candidate Set)...")
                 
-                # Convert images to base64
+                # Convert original input image to base64
+                original_img_bytes = BytesIO()
+                input_image_pil_nobg.save(original_img_bytes, format='PNG')
+                original_img_b64 = base64.b64encode(original_img_bytes.getvalue()).decode('utf-8')
+                
+                # Convert candidate images to base64
                 candidate_views_b64 = []
                 for img in images_pil_for_gemini_candidates:
                     img_bytes = BytesIO()
