@@ -655,25 +655,25 @@ if __name__ == "__main__":
         # Explicitly ensure UNet is on device and in half precision
         if hasattr(pipeline, 'unet') and pipeline.unet is not None:
             pipeline.unet.to(device).half()
-            # for param in pipeline.unet.parameters():
-            #     param.data = param.data.to(device).half()
-            # print("UNet parameters moved and set to half.")
+            for param in pipeline.unet.parameters():
+                 param.data = param.data.to(device).half()
+            print("UNet parameters moved and set to half.")
 
         # Force VAE and its parameters to device and half precision
         if hasattr(pipeline, 'vae') and pipeline.vae is not None:
             pipeline.vae = pipeline.vae.to(device).half() # Move the module itself
             # Iterate over parameters for VAE and explicitly move them
-            # for param in pipeline.vae.parameters():
-            #    param.data = param.data.to(device).half()
-            # print("VAE and its parameters forced to device and half precision.")
+            for param in pipeline.vae.parameters():
+               param.data = param.data.to(device).half()
+            print("VAE and its parameters forced to device and half precision.")
 
         # Force Vision Encoder and its parameters to device and half precision
         if hasattr(pipeline, 'vision_encoder') and pipeline.vision_encoder is not None:
             pipeline.vision_encoder = pipeline.vision_encoder.to(device).half() # Move the module itself
             # Iterate over parameters for Vision Encoder and explicitly move them
-            # for param in pipeline.vision_encoder.parameters():
-            #    param.data = param.data.to(device).half()
-            # print("Vision Encoder and its parameters forced to device and half precision.")
+            for param in pipeline.vision_encoder.parameters():
+               param.data = param.data.to(device).half()
+            print("Vision Encoder and its parameters forced to device and half precision.")
         
         print("Pipeline and critical components processed for device and dtype.")
 
