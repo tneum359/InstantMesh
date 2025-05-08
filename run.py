@@ -9,7 +9,7 @@ from torchvision.transforms import v2
 import torchvision.transforms.functional as F
 from pytorch_lightning import seed_everything
 from omegaconf import OmegaConf
-from einops import rearrange
+from einops import rearrange, repeat
 from tqdm import tqdm
 from glob import glob
 from huggingface_hub import hf_hub_download
@@ -40,7 +40,7 @@ try:
         get_circular_camera_poses,
     )
     from utils.mesh_util import save_obj, save_obj_with_mtl
-    from utils.infer_util import remove_background, resize_foreground
+    from utils.infer_util import remove_background, resize_foreground, save_video
     print("Successfully imported from utils (direct)")
 except ImportError:
     try:
@@ -52,7 +52,7 @@ except ImportError:
             get_circular_camera_poses,
         )
         from src.utils.mesh_util import save_obj, save_obj_with_mtl
-        from src.utils.infer_util import remove_background, resize_foreground
+        from src.utils.infer_util import remove_background, resize_foreground, save_video
         print("Successfully imported from src.utils")
     except ImportError as e:
         print(f"Failed to import required modules. Error: {e}")
@@ -74,7 +74,7 @@ from InstantMesh.src.utils.camera_util import (
     get_circular_camera_poses,
 )
 from InstantMesh.src.utils.mesh_util import save_obj, save_obj_with_mtl
-from InstantMesh.src.utils.infer_util import remove_background, resize_foreground
+from InstantMesh.src.utils.infer_util import remove_background, resize_foreground, save_video
 
 # --- Helper: Composite RGBA over white ---
 def rgba_to_rgb_white(img):
@@ -262,14 +262,19 @@ def process_image(args, config, model_config, infer_config, device,
             random.seed(candidate_seed)
             print(f"Seed set to {candidate_seed}\n")
 
+            # Ensure input image is on the correct device and dtype
+            input_tensor = torch.from_numpy(np.array(input_image_for_pipeline)).permute(2, 0, 1).float() / 255.0
+            input_tensor = input_tensor.unsqueeze(0).to(device=device, dtype=torch.float16)
+
             # Generate the multiview images
-            output_image_pil_grid = pipeline( 
-                input_image_for_pipeline,
-                num_inference_steps=args.diffusion_steps,
-                width=args.gen_width,
-                height=args.gen_height,
-                guidance_scale=3.0,
-            ).images[0]
+            with torch.cuda.amp.autocast():
+                output_image_pil_grid = pipeline( 
+                    input_tensor,
+                    num_inference_steps=args.diffusion_steps,
+                    width=args.gen_width,
+                    height=args.gen_height,
+                    guidance_scale=3.0,
+                ).images[0]
 
             # Process the generated images
             # Split the grid image into individual views
@@ -663,8 +668,6 @@ if __name__ == "__main__":
         print("Using provided --gemini_prompt.")
 
     # --- Load models (Diffusion, UNet, Recon) --- 
-    # (Keep this logic, assuming checkpoints might be relative or downloaded)
-    # ... (Load Diffusion Pipeline) ...
     pipeline = None
     try:
         print('Loading diffusion model ...')
@@ -691,7 +694,12 @@ if __name__ == "__main__":
         
         state_dict = torch.load(unet_ckpt_path, map_location='cpu')
         pipeline.unet.load_state_dict(state_dict, strict=True)
+        
+        # Move pipeline to device and ensure consistent dtype
         pipeline = pipeline.to(device)
+        pipeline.unet = pipeline.unet.to(device)
+        pipeline.vae = pipeline.vae.to(device)
+        pipeline.vision_encoder = pipeline.vision_encoder.to(device)
         
         # Enable memory optimizations for diffusion pipeline
         if hasattr(pipeline, 'enable_attention_slicing'):
