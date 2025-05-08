@@ -654,7 +654,22 @@ if __name__ == "__main__":
         pipeline = pipeline.to(device)
         print("Pipeline moved to device.")
 
-        # No explicit .half() calls needed
+        # Force parameters to device for float32 execution
+        if hasattr(pipeline, 'unet') and pipeline.unet is not None:
+             for param in pipeline.unet.parameters():
+                 param.data = param.data.to(device) # Force params to device
+             print("UNet parameters forced to device.")
+
+        if hasattr(pipeline, 'vae') and pipeline.vae is not None:
+             for param in pipeline.vae.parameters():
+                param.data = param.data.to(device) # Force params to device
+             print("VAE parameters forced to device.")
+
+        if hasattr(pipeline, 'vision_encoder') and pipeline.vision_encoder is not None:
+             for param in pipeline.vision_encoder.parameters():
+                param.data = param.data.to(device) # Force params to device
+             print("Vision Encoder parameters forced to device.")
+        
         print("Pipeline components processed for device (using float32).")
 
         # Enable memory optimizations (Keep these)
