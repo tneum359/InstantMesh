@@ -449,60 +449,58 @@ def process_image(args, config, model_config, infer_config, device,
 
                     if verts_np is None or faces_np is None or colors_np is None:
                         print(f"  Error: Failed to convert one or more mesh components to NumPy. Cannot save OBJ.")
-        else:
+                    else:
                         # Handle potential shape mismatch if color conversion failed differently
                         if colors_np.shape[0] != verts_np.shape[0]:
-                             print(f"  Warning: Vertex and color array lengths mismatch ({verts_np.shape[0]} vs {colors_np.shape[0]}). Using fallback gray.")
-                             colors_np = np.ones_like(verts_np) * 0.5
+                            print(f"  Warning: Vertex and color array lengths mismatch ({verts_np.shape[0]} vs {colors_np.shape[0]}). Using fallback gray.")
+                            colors_np = np.ones_like(verts_np) * 0.5
                         save_obj(verts_np, faces_np, colors_np, output_obj_path)
-
             else:
                 # Ensure mesh_out has vertex colors
                 if len(mesh_out) == 3:
-                     vertices, faces, vertex_colors = mesh_out
-                     # --- Use Safe Conversion Function --- 
-                     verts_np = safe_to_numpy(vertices)
-                     faces_np = safe_to_numpy(faces)
-                     
-                     if verts_np is None or faces_np is None:
-                          print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
-                     else:
-                         colors_np = safe_to_numpy(vertex_colors)
-                         if colors_np is None:
-                             print(f"  Warning: Failed to convert vertex_colors to NumPy. Using fallback gray.")
-                             colors_np = np.ones_like(verts_np) * 0.5
-                         save_obj(verts_np, faces_np, colors_np, output_obj_path)
+                    vertices, faces, vertex_colors = mesh_out
+                    # --- Use Safe Conversion Function --- 
+                    verts_np = safe_to_numpy(vertices)
+                    faces_np = safe_to_numpy(faces)
+                    
+                    if verts_np is None or faces_np is None:
+                        print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
+                    else:
+                        colors_np = safe_to_numpy(vertex_colors)
+                        if colors_np is None:
+                            print(f"  Warning: Failed to convert vertex_colors to NumPy. Using fallback gray.")
+                            colors_np = np.ones_like(verts_np) * 0.5
+                        save_obj(verts_np, faces_np, colors_np, output_obj_path)
                 else:
-                     print("  Warning: Vertex colors expected but mesh output format unexpected. Saving without colors.")
-                     # Handle cases where only vertices and faces might be returned
-                     if len(mesh_out) == 2:
-                          vertices, faces = mesh_out
-                          # --- Use Safe Conversion Function --- 
-                          verts_np = safe_to_numpy(vertices)
-                          faces_np = safe_to_numpy(faces)
-                          
-                          if verts_np is None or faces_np is None:
-                               print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
-                          else:
-                              dummy_colors = np.ones_like(verts_np) * 0.5 # Gray
-                              save_obj(verts_np, faces_np, dummy_colors, output_obj_path)
-                     else:
-                          print(f"  Error: Unexpected number of items ({len(mesh_out)}) returned by extract_mesh. Cannot save OBJ.")
+                    print("  Warning: Vertex colors expected but mesh output format unexpected. Saving without colors.")
+                    # Handle cases where only vertices and faces might be returned
+                    if len(mesh_out) == 2:
+                        vertices, faces = mesh_out
+                        # --- Use Safe Conversion Function --- 
+                        verts_np = safe_to_numpy(vertices)
+                        faces_np = safe_to_numpy(faces)
+                        
+                        if verts_np is None or faces_np is None:
+                            print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
+                        else:
+                            dummy_colors = np.ones_like(verts_np) * 0.5 # Gray
+                            save_obj(verts_np, faces_np, dummy_colors, output_obj_path)
+                    else:
+                        print(f"  Error: Unexpected number of items ({len(mesh_out)}) returned by extract_mesh. Cannot save OBJ.")
 
-            
             # --- Rename the saved OBJ ---
             if os.path.exists(output_obj_path):
-                 try:
-                     # Ensure target path doesn't exist (optional, os.rename might overwrite)
-                     if os.path.exists(final_output_obj_path):
-                          print(f"  Warning: Overwriting existing file {final_output_obj_path}")
-                          os.remove(final_output_obj_path)
-                     os.rename(output_obj_path, final_output_obj_path)
-                     print(f"  Mesh saved to {final_output_obj_path}")
-                 except Exception as e:
-                      print(f"  Error renaming {output_obj_path} to {final_output_obj_path}: {e}")
+                try:
+                    # Ensure target path doesn't exist (optional, os.rename might overwrite)
+                    if os.path.exists(final_output_obj_path):
+                        print(f"  Warning: Overwriting existing file {final_output_obj_path}")
+                        os.remove(final_output_obj_path)
+                    os.rename(output_obj_path, final_output_obj_path)
+                    print(f"  Mesh saved to {final_output_obj_path}")
+                except Exception as e:
+                    print(f"  Error renaming {output_obj_path} to {final_output_obj_path}: {e}")
             else:
-                 print(f"  Warning: Mesh file {output_obj_path} not found after saving.")
+                print(f"  Warning: Mesh file {output_obj_path} not found after saving.")
 
     except Exception as e:
         print(f"\n !!! UNHANDLED ERROR processing {img_name_base} ({'Gemini pass' if is_gemini_pass else 'No Gemini pass'}) !!!")
@@ -511,18 +509,18 @@ def process_image(args, config, model_config, infer_config, device,
 
 # --- Main Execution Logic ---
 if __name__ == "__main__":
-parser = argparse.ArgumentParser()
-parser.add_argument('config', type=str, help='Path to config file.')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('config', type=str, help='Path to config file.')
     parser.add_argument('--input_path', type=str, required=True, help='Path to input image or directory.')
     parser.add_argument('--output_intermediate_path', type=str, default='outputs/intermediate_images', help='Base directory for intermediate outputs.')
     parser.add_argument('--output_3d_path', type=str, default='outputs/output_3d', help='Base directory for final 3D outputs.')
-parser.add_argument('--diffusion_steps', type=int, default=75, help='Denoising Sampling steps.')
-parser.add_argument('--seed', type=int, default=42, help='Random seed for sampling.')
-parser.add_argument('--scale', type=float, default=1.0, help='Scale of generated object.')
-parser.add_argument('--distance', type=float, default=4.5, help='Render distance.')
+    parser.add_argument('--diffusion_steps', type=int, default=75, help='Denoising Sampling steps.')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for sampling.')
+    parser.add_argument('--scale', type=float, default=1.0, help='Scale of generated object.')
+    parser.add_argument('--distance', type=float, default=4.5, help='Render distance.')
     parser.add_argument('--view', type=int, default=6, choices=[4, 6], help='Number of views for reconstruction.')
-parser.add_argument('--no_rembg', action='store_true', help='Do not remove input background.')
-parser.add_argument('--export_texmap', action='store_true', help='Export a mesh with texture map.')
+    parser.add_argument('--no_rembg', action='store_true', help='Do not remove input background.')
+    parser.add_argument('--export_texmap', action='store_true', help='Export a mesh with texture map.')
     parser.add_argument('--save_video', action='store_true', help='Save a circular-view video (Not fully supported in batch mode).')
     parser.add_argument('--num_candidates', type=int, default=8, help='Maximum number of candidates to generate.')
     parser.add_argument('--min_candidates', type=int, default=3, help='Minimum number of candidates to generate.')
@@ -531,21 +529,21 @@ parser.add_argument('--export_texmap', action='store_true', help='Export a mesh 
     parser.add_argument('--gen_width', type=int, default=640, help='Width for multiview generation.')
     parser.add_argument('--gen_height', type=int, default=960, help='Height for multiview generation.')
     parser.add_argument('--batch_mode', action='store_true', help='Process all PNGs in input_path directory.')
-args = parser.parse_args()
+    args = parser.parse_args()
 
     # --- Basic Setup ---
     print("--- Initializing Models and Environment ---")
     seed_everything(args.seed)
     try:
-config = OmegaConf.load(args.config)
-config_name = os.path.basename(args.config).replace('.yaml', '')
-model_config = config.model_config
-infer_config = config.infer_config
+        config = OmegaConf.load(args.config)
+        config_name = os.path.basename(args.config).replace('.yaml', '')
+        model_config = config.model_config
+        infer_config = config.infer_config
     except Exception as e:
         print(f"Error loading config file {args.config}: {e}")
         exit(1)
 
-IS_FLEXICUBES = True if config_name.startswith('instant-mesh') else False
+    IS_FLEXICUBES = True if config_name.startswith('instant-mesh') else False
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -622,42 +620,42 @@ IS_FLEXICUBES = True if config_name.startswith('instant-mesh') else False
     # --- Load models (Diffusion, UNet, Recon) --- 
     pipeline = None
     try:
-print('Loading diffusion model ...')
-pipeline = DiffusionPipeline.from_pretrained(
-    "sudo-ai/zero123plus-v1.2", 
-    custom_pipeline="sudo-ai/zero123plus-pipeline",
-    torch_dtype=torch.float16,
-)
-pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-    pipeline.scheduler.config, timestep_spacing='trailing'
-)
+        print('Loading diffusion model ...')
+        pipeline = DiffusionPipeline.from_pretrained(
+            "sudo-ai/zero123plus-v1.2", 
+            custom_pipeline="sudo-ai/zero123plus-pipeline",
+            torch_dtype=torch.float16,
+        )
+        pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
+            pipeline.scheduler.config, timestep_spacing='trailing'
+        )
 
-# Move all pipeline components to device and ensure consistent dtype
-pipeline = pipeline.to(device)
-pipeline.unet = pipeline.unet.to(device)
-pipeline.vae = pipeline.vae.to(device)
-pipeline.vision_encoder = pipeline.vision_encoder.to(device)
+        # Move all pipeline components to device and ensure consistent dtype
+        pipeline = pipeline.to(device)
+        pipeline.unet = pipeline.unet.to(device)
+        pipeline.vae = pipeline.vae.to(device)
+        pipeline.vision_encoder = pipeline.vision_encoder.to(device)
 
-# Ensure all components use float16
-pipeline.unet = pipeline.unet.half()
-pipeline.vae = pipeline.vae.half()
-pipeline.vision_encoder = pipeline.vision_encoder.half()
+        # Ensure all components use float16
+        pipeline.unet = pipeline.unet.half()
+        pipeline.vae = pipeline.vae.half()
+        pipeline.vision_encoder = pipeline.vision_encoder.half()
 
-print('Loading custom white-background unet ...')
+        print('Loading custom white-background unet ...')
         # Try finding UNet relative to script parent first, then config path, then download
         unet_path_rel = os.path.join(PARENT_DIR, "ckpts", "diffusion_pytorch_model.bin") 
-if os.path.exists(infer_config.unet_path):
-             unet_ckpt_path = infer_config.unet_path # Allow override from config
-             print(f"  Using UNet from config: {unet_ckpt_path}")
+        if os.path.exists(infer_config.unet_path):
+            unet_ckpt_path = infer_config.unet_path # Allow override from config
+            print(f"  Using UNet from config: {unet_ckpt_path}")
         elif os.path.exists(unet_path_rel):
-             unet_ckpt_path = unet_path_rel
-             print(f"  Using local UNet: {unet_ckpt_path}")
-else:
+            unet_ckpt_path = unet_path_rel
+            print(f"  Using local UNet: {unet_ckpt_path}")
+        else:
             print(f"Custom UNet not found locally, downloading...")
-    unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
+            unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
         
-state_dict = torch.load(unet_ckpt_path, map_location='cpu')
-pipeline.unet.load_state_dict(state_dict, strict=True)
+        state_dict = torch.load(unet_ckpt_path, map_location='cpu')
+        pipeline.unet.load_state_dict(state_dict, strict=True)
 
         # Enable memory optimizations for diffusion pipeline
         if hasattr(pipeline, 'enable_attention_slicing'):
@@ -697,22 +695,22 @@ pipeline.unet.load_state_dict(state_dict, strict=True)
     # ... (Load Reconstruction Model) ...
     model = None
     try:
-print('Loading reconstruction model ...')
-model = instantiate_from_config(model_config)
+        print('Loading reconstruction model ...')
+        model = instantiate_from_config(model_config)
         model_ckpt_filename = f"{config_name.replace('-', '_')}.ckpt"
         # Try finding model relative to script parent first, then config path, then download
         model_path_rel = os.path.join(PARENT_DIR, "ckpts", model_ckpt_filename) 
         if hasattr(infer_config, 'model_path') and os.path.exists(infer_config.model_path):
-             model_ckpt_path = infer_config.model_path # Allow override
-             print(f"  Using Recon Model from config: {model_ckpt_path}")
+            model_ckpt_path = infer_config.model_path # Allow override
+            print(f"  Using Recon Model from config: {model_ckpt_path}")
         elif os.path.exists(model_path_rel):
-             model_ckpt_path = model_path_rel
-             print(f"  Using local Recon Model: {model_ckpt_path}")
-else:
+            model_ckpt_path = model_path_rel
+            print(f"  Using local Recon Model: {model_ckpt_path}")
+        else:
             print(f"Reconstruction model not found locally, downloading...")
             model_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename=model_ckpt_filename, repo_type="model")
         
-state_dict = torch.load(model_ckpt_path, map_location='cpu')['state_dict']
+        state_dict = torch.load(model_ckpt_path, map_location='cpu')['state_dict']
         state_dict = {k[14:]: v for k, v in state_dict.items() if k.startswith('lrm_generator.') and 'renderer' not in k}
         model.load_state_dict(state_dict, strict=False)
         
@@ -720,14 +718,14 @@ state_dict = torch.load(model_ckpt_path, map_location='cpu')['state_dict']
         if hasattr(model, 'encoder') and hasattr(model.encoder, 'gradient_checkpointing_enable'):
             model.encoder.gradient_checkpointing_enable()
 
-model = model.to(device)
-if IS_FLEXICUBES:
+        model = model.to(device)
+        if IS_FLEXICUBES:
             # Check if geometry needs initialization
             if hasattr(model, 'init_flexicubes_geometry'): 
-    model.init_flexicubes_geometry(device, fovy=30.0)
+                model.init_flexicubes_geometry(device, fovy=30.0)
             else:
-                 print("Warning: Model does not have init_flexicubes_geometry method.")
-model = model.eval()
+                print("Warning: Model does not have init_flexicubes_geometry method.")
+        model = model.eval()
 
         # Clear CUDA cache after model loading
         if torch.cuda.is_available():
@@ -758,7 +756,7 @@ model = model.eval()
             print("         (Requires --num_candidates > 1 AND GEMINI_API_KEY to be set).")
             print("         No processing will be performed in this run.")
             # Optionally exit here, or let it proceed (currently proceeds and skips each image)
-            # exit(1) 
+            # exit(1)
 
         # --- Begin Batch Processing ---
         input_dir = args.input_path
@@ -767,36 +765,36 @@ model = model.eval()
              print(f"Error: No PNG images found in batch input directory via glob: {input_dir}.")
              exit(1)
         print(f"--- Starting Batch Mode (Gemini Pass Only): Found {len(all_images)} PNG images in {input_dir} ---")
-        
-        for img_path in tqdm(all_images, desc="Processing Batch (Gemini Pass)"): 
+
+        for img_path in tqdm(all_images, desc="Processing Batch (Gemini Pass)"):
             img_name = os.path.splitext(os.path.basename(img_path))[0]
             intermediate_subdir = os.path.join(args.output_intermediate_path, f'data_{img_name}')
             output_subdir = os.path.join(args.output_3d_path, f'output_{img_name}')
             os.makedirs(intermediate_subdir, exist_ok=True)
             os.makedirs(output_subdir, exist_ok=True)
-            
+
             # --- Removed Pass 1 (No Gemini) ---
-            # process_image(args, config, model_config, infer_config, device, 
+            # process_image(args, config, model_config, infer_config, device,
             #               pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
             #               img_path, intermediate_subdir, output_subdir, is_gemini_pass=False)
-            
+
             # --- Run Only Pass 2 (With Gemini, if available) ---
             if gemini_available_flag:
                  print(f"\n[{img_name}] Processing Gemini Pass (from {img_path}) ...")
                  try:
-                      process_image(args, config, model_config, infer_config, device, 
+                      process_image(args, config, model_config, infer_config, device,
                                     pipeline, model, gemini_verifier, rembg_session, None, # Pass None for cameras
                                     img_path, intermediate_subdir, output_subdir, is_gemini_pass=True)
-        except Exception as e:
+                 except Exception as e:
                       print(f"\n !!! UNHANDLED ERROR processing {img_name} (Gemini pass) !!!")
                       print(f"Error: {e}")
                       traceback.print_exc()
                       print(f"  Skipping to next image due to error.")
-                else:
-                 # This message will now appear if the warning at the start wasn't triggered 
+            else:
+                 # This message will now appear if the warning at the start wasn't triggered
                  # (e.g., if API key exists but num_candidates=1 was somehow forced - less likely now)
                  # Or if the loop continued despite the initial warning.
-                 print(f"  [{img_name}] Skipping: Gemini pass required but not available/enabled for this run.") 
+                 print(f"  [{img_name}] Skipping: Gemini pass required but not available/enabled for this run.")
 
         print("--- Batch processing complete. ---")
 
