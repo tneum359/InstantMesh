@@ -424,6 +424,7 @@ def process_image(args, config, model_config, infer_config, device,
         # Clear CUDA cache before reconstruction
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         
         # Resize images to a smaller size for reconstruction
         target_size = (512, 512)  # Reduced from 2048x2048
@@ -459,6 +460,7 @@ def process_image(args, config, model_config, infer_config, device,
         # Clear memory after triplane generation
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         
         # Generate mesh
         print("  Generating mesh...")
@@ -690,6 +692,15 @@ if __name__ == "__main__":
         state_dict = torch.load(unet_ckpt_path, map_location='cpu')
         pipeline.unet.load_state_dict(state_dict, strict=True)
         pipeline = pipeline.to(device)
+        
+        # Enable memory optimizations for diffusion pipeline
+        if hasattr(pipeline, 'enable_attention_slicing'):
+            pipeline.enable_attention_slicing()
+        if hasattr(pipeline, 'enable_vae_slicing'):
+            pipeline.enable_vae_slicing()
+        if hasattr(pipeline, 'enable_model_cpu_offload'):
+            pipeline.enable_model_cpu_offload()
+            
         print("Diffusion pipeline loaded.")
     except Exception as e:
         print(f"Error loading diffusion model: {e}")
@@ -738,6 +749,11 @@ if __name__ == "__main__":
         state_dict = torch.load(model_ckpt_path, map_location='cpu')['state_dict']
         state_dict = {k[14:]: v for k, v in state_dict.items() if k.startswith('lrm_generator.') and 'renderer' not in k}
         model.load_state_dict(state_dict, strict=False)
+        
+        # Enable memory optimizations for reconstruction model
+        if hasattr(model, 'encoder') and hasattr(model.encoder, 'gradient_checkpointing_enable'):
+            model.encoder.gradient_checkpointing_enable()
+        
         model = model.to(device)
         if IS_FLEXICUBES:
             # Check if geometry needs initialization
@@ -746,6 +762,12 @@ if __name__ == "__main__":
             else:
                  print("Warning: Model does not have init_flexicubes_geometry method.")
         model = model.eval()
+        
+        # Clear CUDA cache after model loading
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            
         print("Reconstruction model loaded.")
     except Exception as e:
         print(f"Error loading reconstruction model: {e}")
