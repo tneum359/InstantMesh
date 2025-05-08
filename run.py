@@ -622,12 +622,11 @@ if __name__ == "__main__":
     pipeline = None
     try:
         print('Loading diffusion model ...')
-        # Load the pipeline, hint float16 dtype
+        # Load the pipeline in full float32 precision
         pipeline = DiffusionPipeline.from_pretrained(
             "sudo-ai/zero123plus-v1.2", 
-            custom_pipeline="sudo-ai/zero123plus-pipeline",
-            # variant="fp16", # Removed: Variant doesn't exist
-            torch_dtype=torch.float16, 
+            custom_pipeline="sudo-ai--zero123plus-pipeline",
+            # torch_dtype=torch.float16, # Removed for float32
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
             pipeline.scheduler.config, timestep_spacing='trailing'
@@ -646,35 +645,17 @@ if __name__ == "__main__":
             print(f"Custom UNet not found locally, downloading...")
             unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
         
-        # Load custom UNet weights onto the (likely) CPU/float32 UNet
+        # Load custom UNet weights onto the CPU UNet
         state_dict = torch.load(unet_ckpt_path, map_location='cpu') 
         pipeline.unet.load_state_dict(state_dict, strict=True) 
         print("Custom UNet weights loaded.")
 
-        # Move the entire pipeline to the target device first.
+        # Move the entire pipeline to the target device.
         pipeline = pipeline.to(device)
         print("Pipeline moved to device.")
 
-        # Explicitly set components to half and force parameters
-        if hasattr(pipeline, 'unet') and pipeline.unet is not None:
-            pipeline.unet.half() # Convert module to half
-            for param in pipeline.unet.parameters():
-                param.data = param.data.to(device).half() # Force params
-            print("UNet set to half and parameters forced.")
-
-        if hasattr(pipeline, 'vae') and pipeline.vae is not None:
-            pipeline.vae.half() # Convert module to half
-            for param in pipeline.vae.parameters():
-               param.data = param.data.to(device).half() # Force params
-            print("VAE set to half and parameters forced.")
-
-        if hasattr(pipeline, 'vision_encoder') and pipeline.vision_encoder is not None:
-            pipeline.vision_encoder.half() # Convert module to half
-            for param in pipeline.vision_encoder.parameters():
-               param.data = param.data.to(device).half() # Force params
-            print("Vision Encoder set to half and parameters forced.")
-        
-        print("Pipeline components processed for device and dtype.")
+        # No explicit .half() calls or parameter forcing needed for float32
+        print("Pipeline components processed for device (using float32).")
 
         # Enable memory optimizations for diffusion pipeline
         if hasattr(pipeline, 'enable_attention_slicing'):
