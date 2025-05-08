@@ -199,192 +199,185 @@ def process_image(args, config, model_config, infer_config, device,
         input_image_for_pipeline = input_image_pil_nobg.convert('RGB') 
 
         # --- Candidate Generation Loop ---
-        best_group_seed = -1
-        best_group_score = -float('inf') 
-        best_group_images_tensor = None
-        best_group_pil_grid_raw = None 
-        best_group_pil_list_processed_rgb = None 
-        best_candidate_metadata = None 
+        best_candidate_metadata = None
+        best_candidate_images = None
+        best_candidate_grid = None
+        best_candidate_grid_raw = None
+        best_candidate_score = 0.0
+        best_candidate_seed = None
+        candidate_count = 0
+        min_candidates = 3  # Minimum number of candidates to try
+        max_candidates = args.num_candidates  # Maximum number of candidates to try
+        target_score = 8.0  # Target score to achieve
 
-        num_actual_candidates = 1 if not is_gemini_pass else args.num_candidates
-        print(f"  Generating and evaluating {num_actual_candidates} candidate group(s)...")
-        
-        for candidate_idx in range(num_actual_candidates):
-            current_seed = random.randint(0, 2**32 - 1)
-            print(f"    --- Candidate Group {candidate_idx + 1}/{num_actual_candidates} ---")
-            print(f"    Generating multiview images with seed: {current_seed}... (Res: {args.gen_width}x{args.gen_height})") 
-            seed_everything(current_seed)
-            output_image_pil_grid = None # Initialize
-            try:
-                 output_image_pil_grid = pipeline( 
-                     input_image_for_pipeline, 
-                     num_inference_steps=args.diffusion_steps,
-                     width=args.gen_width, 
-                     height=args.gen_height,
-                     guidance_scale=3.0, 
-                 ).images[0]
-            except Exception as e:
-                 print(f"    Error during diffusion pipeline generation for candidate {candidate_idx + 1}: {e}")
-                 traceback.print_exc()
-                 continue # Skip to next candidate
+        # Continue generating candidates until we either:
+        # 1. Get a score above target_score, or
+        # 2. Reach max_candidates, or
+        # 3. Have tried at least min_candidates
+        while (candidate_count < min_candidates or 
+               (best_candidate_score < target_score and candidate_count < max_candidates)):
             
-            if output_image_pil_grid is None:
-                print(f"    Skipping candidate {candidate_idx+1} due to diffusion generation failure.")
-                continue
+            candidate_count += 1
+            print(f"\n    --- Candidate Group {candidate_count}/{max_candidates} ---")
+            
+            # Generate a new random seed for this candidate
+            candidate_seed = random.randint(0, 2**32 - 1)
+            print(f"    Generating multiview images with seed: {candidate_seed}... (Res: {args.gen_width}x{args.gen_height})")
+            
+            # Set the seed for this candidate
+            torch.manual_seed(candidate_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(candidate_seed)
+            np.random.seed(candidate_seed)
+            random.seed(candidate_seed)
+            print(f"Seed set to {candidate_seed}\n")
 
-            # (Background removal for generated multiviews and tensor prep logic here...)
-            # This part remains complex but assumed correct from previous steps.
-            # Ensure `multiview_pil_list_nobg_rgba_current_candidate` and `images_tensor` are correctly populated.
-            # For brevity, I'm not re-listing the entire rembg loop for generated views.
-            # Just ensure `multiview_pil_list_nobg_rgba_current_candidate` is the list of 6 RGBA PILs.
-            # And `images_tensor` is the torch tensor for reconstruction.
-            # --- Placeholder for multiview processing --- 
-            w, h = output_image_pil_grid.size
-            sub_w, sub_h = w // 2, h // 3 
-            multiview_pil_list_raw = []
-            for row in range(3):
-                for col in range(2):
-                    box = (col * sub_w, row * sub_h, (col + 1) * sub_w, (row + 1) * sub_h)
-                    multiview_pil_list_raw.append(output_image_pil_grid.crop(box))
-            multiview_pil_list_nobg_rgb_current_candidate = [] 
-            multiview_pil_list_nobg_rgba_current_candidate = []
-            if not args.no_rembg and rembg_session is not None:
-                # ... (Full rembg logic for generated views) ...
-                for i, img_pil in enumerate(multiview_pil_list_raw):
-                    try:
-                        img_nobg_rgba = rembg.remove(img_pil, session=rembg_session)
-                        multiview_pil_list_nobg_rgba_current_candidate.append(img_nobg_rgba)
-                        multiview_pil_list_nobg_rgb_current_candidate.append(rgba_to_rgb_white(img_nobg_rgba))
-                    except: # Fallback
-                        multiview_pil_list_nobg_rgba_current_candidate.append(img_pil.convert("RGBA"))
-                        multiview_pil_list_nobg_rgb_current_candidate.append(img_pil.convert("RGB"))
-            else:
-                for img_pil in multiview_pil_list_raw:
-                    multiview_pil_list_nobg_rgba_current_candidate.append(img_pil.convert("RGBA"))
-                    multiview_pil_list_nobg_rgb_current_candidate.append(img_pil.convert("RGB"))
-            transform = v2.Compose([v2.ToTensor()])
-            images_tensor_list = [transform(img) for img in multiview_pil_list_nobg_rgb_current_candidate]
-            images_tensor = torch.stack(images_tensor_list).unsqueeze(0).to(device)
-            images_tensor = v2.functional.resize(images_tensor, 320, interpolation=3, antialias=True).clamp(0, 1)
-            # --- End placeholder ---
+            # Generate the multiview images
+            output_image_pil_grid = pipeline( 
+                input_image_for_pipeline,
+                num_inference_steps=args.diffusion_steps,
+                width=args.gen_width,
+                height=args.gen_height,
+                guidance_scale=3.0,
+            ).images[0]
 
-            current_score = 0.0 
-            current_candidate_metadata = None 
-
-            if is_gemini_pass and gemini_verifier is not None:
-                print(f"    Preparing data for Gemini scoring (Original + Candidate Set {candidate_idx + 1})...")
-                original_img_b64 = None
-                try:
-                    buffered = BytesIO()
-                    # Ensure input_image_pil_nobg is RGBA before saving as PNG for Gemini
-                    img_for_gemini_encoding = input_image_pil_nobg
-                    if img_for_gemini_encoding.mode != 'RGBA':
-                        print("      Converting original input to RGBA for Gemini encoding...")
-                        img_for_gemini_encoding = input_image_pil_nobg.convert('RGBA')
-                    
-                    img_for_gemini_encoding.save(buffered, format="PNG")
-                    original_img_b64 = base64.b64encode(buffered.getvalue()).decode()
-                except Exception as e:
-                    print(f"      Warning: Failed to encode original input image for Gemini: {e}. Skipping candidate.")
-                    traceback.print_exc()
-                    continue # Skip this candidate
-
-                candidate_views_b64_list = []
-                for img_pil in multiview_pil_list_nobg_rgba_current_candidate: # Use the RGBA list for Gemini
-                    try:
-                        buffered = BytesIO()
-                        img_pil.save(buffered, format="PNG") # Already RGBA from processing step
-                        candidate_views_b64_list.append(base64.b64encode(buffered.getvalue()).decode())
-                    except Exception as e:
-                        print(f"      Warning: Failed to encode a candidate view for Gemini: {e}")
+            # Process the generated images
+            images_pil = output_image_pil_grid.images
+            images_pil_for_gemini_candidates = []
+            images_pil_for_gemini_candidates_processed = []
+            
+            for i, img in enumerate(images_pil):
+                # Convert to numpy array
+                img_np = np.array(img)
                 
-                if not original_img_b64 or not candidate_views_b64_list or len(candidate_views_b64_list) != 6:
-                    print(f"    Skipping Gemini scoring for candidate {candidate_idx + 1}: Missing original image or incomplete/failed candidate views encoding.")
-                else:
-                    gemini_api_input_payload = {
-                        "original_image_b64": original_img_b64,
-                        "candidate_views_b64": candidate_views_b64_list
-                    }
-                    print(f"    Scoring candidate group {candidate_idx + 1} with Gemini...")
-                    try:
-                        gemini_result = gemini_verifier.score(inputs=gemini_api_input_payload) 
-                        
-                        if gemini_result.get("success"):
-                            current_candidate_metadata = gemini_result.get("result")
-                            if current_candidate_metadata and isinstance(current_candidate_metadata.get('overall_score'), (int, float)):
-                                current_score = current_candidate_metadata['overall_score']
-                                print(f"    Gemini Score: {current_score:.4f}")
-                            else:
-                                print("    Warning: Gemini did not return a valid overall_score.")
-                                # current_candidate_metadata might still be useful even if overall_score is off
-                        else:
-                            print(f"    Warning: Gemini evaluation failed for candidate {candidate_idx + 1}: {gemini_result.get('error', 'Unknown error')}")
-                            if gemini_result.get('raw_response'):
-                                print(f"      Raw Gemini Response: {str(gemini_result['raw_response'])[:300]}...") 
+                # Remove background
+                img_np_nobg = rembg_session.remove(img_np)
+                
+                # Convert back to PIL
+                img_pil_nobg = Image.fromarray(img_np_nobg)
+                
+                # Resize to match input image
+                img_pil_nobg_resized = img_pil_nobg.resize((input_image_pil_nobg.size[0], input_image_pil_nobg.size[1]))
+                
+                # Convert to numpy array
+                img_np_nobg_resized = np.array(img_pil_nobg_resized)
+                
+                # Convert to RGB if needed
+                if img_np_nobg_resized.shape[2] == 4:
+                    img_np_nobg_resized = img_np_nobg_resized[:, :, :3]
+                
+                # Convert back to PIL
+                img_pil_nobg_resized = Image.fromarray(img_np_nobg_resized)
+                
+                # Save processed image
+                img_pil_nobg_resized.save(os.path.join(intermediate_dir, f"processed_view_{i}_seed_{candidate_seed}.png"))
+                
+                # Add to lists
+                images_pil_for_gemini_candidates.append(img_pil_nobg_resized)
+                images_pil_for_gemini_candidates_processed.append(img_np_nobg_resized)
 
-                    except Exception as e:
-                        print(f"    Error calling Gemini score method for candidate {candidate_idx + 1}: {e}")
-                        traceback.print_exc()
+            # Create a grid of the processed images
+            grid_img = create_image_grid(images_pil_for_gemini_candidates_processed)
+            grid_img_pil = Image.fromarray(grid_img)
+            grid_img_pil.save(os.path.join(intermediate_dir, f"multiview_grid_processed_seed_{candidate_seed}.png"))
             
-            # Check if this candidate is the best so far
-            if current_score > best_group_score or (not is_gemini_pass and candidate_idx == 0):
-                print(f"    New best group found (Score: {current_score:.4f}) Seed: {current_seed}")
-                best_group_score = current_score
-                best_group_seed = current_seed
-                best_group_images_tensor = images_tensor 
-                best_group_pil_grid_raw = output_image_pil_grid 
-                best_group_pil_list_processed_rgb = multiview_pil_list_nobg_rgb_current_candidate 
-                if is_gemini_pass and current_candidate_metadata: 
-                    best_candidate_metadata = current_candidate_metadata
+            # Create a grid of the raw images
+            grid_img_raw = create_image_grid([np.array(img) for img in images_pil])
+            grid_img_raw_pil = Image.fromarray(grid_img_raw)
+            grid_img_raw_pil.save(os.path.join(intermediate_dir, f"multiview_grid_raw_seed_{candidate_seed}.png"))
 
-        if best_group_images_tensor is None:
-             print("  Error: No successful candidate group generated.")
-             raise RuntimeError("Failed to generate any valid candidate group.")
+            # Score with Gemini if available
+            if gemini_verifier is not None:
+                print("    Preparing data for Gemini scoring (Original + Candidate Set)...")
+                
+                # Convert images to base64
+                candidate_views_b64 = []
+                for img in images_pil_for_gemini_candidates:
+                    img_bytes = BytesIO()
+                    img.save(img_bytes, format='PNG')
+                    img_b64 = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
+                    candidate_views_b64.append(img_b64)
+                
+                # Create input for Gemini
+                gemini_api_input_payload = {
+                    "original_image_b64": original_img_b64,
+                    "candidate_views_b64": candidate_views_b64
+                }
+                
+                print("    Scoring candidate group with Gemini...")
+                gemini_result = gemini_verifier.score(inputs=gemini_api_input_payload)
+                
+                if gemini_result["success"]:
+                    candidate_score = gemini_result["result"]["overall_score"]
+                    print(f"    Gemini Score: {candidate_score:.4f}")
+                    
+                    # Update best candidate if this one is better
+                    if candidate_score > best_candidate_score:
+                        best_candidate_score = candidate_score
+                        best_candidate_seed = candidate_seed
+                        best_candidate_metadata = {
+                            "seed": candidate_seed,
+                            "score": candidate_score,
+                            "gemini_scores": gemini_result["result"]
+                        }
+                        best_candidate_images = images_pil_for_gemini_candidates
+                        best_candidate_grid = grid_img
+                        best_candidate_grid_raw = grid_img_raw
+                        print(f"    New best group found (Score: {candidate_score:.4f}) Seed: {candidate_seed}")
+                else:
+                    print(f"    Warning: Gemini evaluation failed for candidate {candidate_count}: {gemini_result['error']}")
+                    # If Gemini fails, use this candidate as best if we don't have one yet
+                    if best_candidate_metadata is None:
+                        best_candidate_metadata = {
+                            "seed": candidate_seed,
+                            "score": 0.0,
+                            "gemini_scores": None
+                        }
+                        best_candidate_images = images_pil_for_gemini_candidates
+                        best_candidate_grid = grid_img
+                        best_candidate_grid_raw = grid_img_raw
+                        best_candidate_seed = candidate_seed
+                        print(f"    Using candidate as best (no score) Seed: {candidate_seed}")
 
-        print(f"  Selected best group for {img_name_base} (Seed: {best_group_seed}, Score: {best_group_score:.4f})")
+            # Print progress towards target score
+            if gemini_verifier is not None:
+                print(f"    Current best score: {best_candidate_score:.4f} (Target: {target_score})")
+                if best_candidate_score >= target_score:
+                    print(f"    Target score achieved! Stopping candidate generation.")
+                elif candidate_count >= max_candidates:
+                    print(f"    Reached maximum number of candidates ({max_candidates}).")
+                elif candidate_count < min_candidates:
+                    print(f"    Continuing to meet minimum candidate requirement ({min_candidates}).")
 
-        # --- Save Intermediate Outputs ONLY FOR THE BEST Group --- 
-        # (Directly into intermediate_dir, which was cleaned if is_gemini_pass)
-        if best_group_pil_list_processed_rgb:
-            # Save individual processed views of the best candidate
-            for i, img in enumerate(best_group_pil_list_processed_rgb):
-                img.save(os.path.join(intermediate_dir, f'best_view_processed_{i}.png'))
-            print(f"  Saved best candidate processed views to {intermediate_dir}")
-
-            # Create and Save Processed Grid of the best candidate
-            try:
-                transform_to_tensor = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
-                tensors_for_grid = [transform_to_tensor(img) for img in best_group_pil_list_processed_rgb]
-                if tensors_for_grid:
-                    processed_grid_tensor = make_grid(tensors_for_grid, nrow=2)
-                    processed_grid_pil = F.to_pil_image(processed_grid_tensor)
-                    processed_grid_path = os.path.join(intermediate_dir, f'best_multiview_grid_processed_seed_{best_group_seed}.png')
-                    processed_grid_pil.save(processed_grid_path)
-                    print(f"  Saved best candidate processed grid to {processed_grid_path}")
-            except Exception as e:
-                print(f"  Warning: Failed to create or save processed grid for best candidate: {e}")
-        
-        # Save the RAW grid from the diffusion model for the best candidate (optional)
-        if best_group_pil_grid_raw:
-            raw_grid_path = os.path.join(intermediate_dir, f'best_multiview_grid_raw_seed_{best_group_seed}.png')
-            best_group_pil_grid_raw.save(raw_grid_path)
-            print(f"  Saved best candidate RAW grid to {raw_grid_path}")
-
-        # Save Gemini scores for the best candidate if it was a Gemini pass and metadata exists
-        if is_gemini_pass and best_candidate_metadata:
-            best_meta_path = os.path.join(intermediate_dir, f'gemini_scores_best_seed_{best_group_seed}.json')
-            try:
-                with open(best_meta_path, 'w') as f:
-                    json.dump(best_candidate_metadata, f, indent=4)
-                print(f"  Saved best candidate's Gemini scores to {best_meta_path}")
-            except Exception as e:
-                print(f"  Warning: Failed to save best candidate's Gemini metadata: {e}")
-        # --- End Intermediate Saving for Best --- 
+        # After the loop, save the best candidate's outputs
+        if best_candidate_metadata is not None:
+            print(f"  Selected best group (Seed: {best_candidate_seed}, Score: {best_candidate_score:.4f})")
+            
+            # Save best candidate's processed views
+            for i, img in enumerate(best_candidate_images):
+                img.save(os.path.join(intermediate_dir, f"best_processed_view_{i}_seed_{best_candidate_seed}.png"))
+            
+            # Save best candidate's processed grid
+            best_grid_pil = Image.fromarray(best_candidate_grid)
+            best_grid_pil.save(os.path.join(intermediate_dir, f"best_multiview_grid_processed_seed_{best_candidate_seed}.png"))
+            
+            # Save best candidate's raw grid
+            best_grid_raw_pil = Image.fromarray(best_candidate_grid_raw)
+            best_grid_raw_pil.save(os.path.join(intermediate_dir, f"best_multiview_grid_raw_seed_{best_candidate_seed}.png"))
+            
+            # Save best candidate's metadata
+            with open(os.path.join(intermediate_dir, "best_candidate_metadata.json"), "w") as f:
+                json.dump(best_candidate_metadata, f, indent=2)
+            
+            # Save best candidate's Gemini scores if available
+            if best_candidate_metadata.get("gemini_scores"):
+                with open(os.path.join(intermediate_dir, "best_candidate_gemini_scores.json"), "w") as f:
+                    json.dump(best_candidate_metadata["gemini_scores"], f, indent=2)
 
         # --- Reconstruction Step (using best_group_images_tensor) ---
         print("  Starting reconstruction...")
         # Use the selected best tensor
-        images = best_group_images_tensor 
+        images = best_candidate_images 
 
         # --- Camera Selection ---
         # Create cameras ONCE outside the loop, select here
