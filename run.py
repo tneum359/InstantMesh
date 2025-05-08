@@ -622,10 +622,10 @@ if __name__ == "__main__":
     pipeline = None
     try:
         print('Loading diffusion model ...')
-        # Load the pipeline in full float32 precision
+        # Load the pipeline in full float32 precision, using correct custom_pipeline name
         pipeline = DiffusionPipeline.from_pretrained(
             "sudo-ai/zero123plus-v1.2", 
-            custom_pipeline="sudo-ai--zero123plus-pipeline",
+            custom_pipeline="zero123plus", # Changed back to match original
             # torch_dtype=torch.float16, # Removed for float32
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
