@@ -268,11 +268,12 @@ def process_image(args, config, model_config, infer_config, device,
             # input_tensor = torch.from_numpy(np.array(input_image_for_pipeline)).permute(2, 0, 1).float() / 255.0
             # input_tensor = input_tensor.unsqueeze(0).to(device=device, dtype=torch.float16)
             
-            with torch.cuda.amp.autocast(): # type: ignore
-                output_image = pipeline(
-                    input_image_for_pipeline, # Pass the PIL image directly
-                    num_inference_steps=args.diffusion_steps,
-                ).images[0]
+            # Temporarily disable autocast to see if it resolves the conflict
+            # with torch.cuda.amp.autocast(): # type: ignore
+            output_image = pipeline(
+                input_image_for_pipeline, # Pass the PIL image directly
+                num_inference_steps=args.diffusion_steps,
+            ).images[0]
 
             # Save the grid image
             output_image.save(os.path.join(intermediate_dir, f'candidate_{candidate_count}_seed_{candidate_seed}.png'))
