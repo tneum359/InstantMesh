@@ -621,25 +621,15 @@ if __name__ == "__main__":
     pipeline = None
     try:
         print('Loading diffusion model ...')
+        # Load the pipeline, preferably in float16 from the start
         pipeline = DiffusionPipeline.from_pretrained(
             "sudo-ai/zero123plus-v1.2", 
             custom_pipeline="sudo-ai/zero123plus-pipeline",
-            torch_dtype=torch.float16, # Hint to load in float16 if possible
+            torch_dtype=torch.float16, 
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
             pipeline.scheduler.config, timestep_spacing='trailing'
         )
-
-        # Move the main pipeline object to the device
-        pipeline = pipeline.to(device)
-
-        # For major sub-components, explicitly set to half precision and move to device
-        if hasattr(pipeline, 'unet') and pipeline.unet is not None:
-            pipeline.unet = pipeline.unet.half().to(device)
-        if hasattr(pipeline, 'vae') and pipeline.vae is not None:
-            pipeline.vae = pipeline.vae.half().to(device)
-        if hasattr(pipeline, 'vision_encoder') and pipeline.vision_encoder is not None:
-            pipeline.vision_encoder = pipeline.vision_encoder.half().to(device)
 
         print('Loading custom white-background unet ...')
         # Try finding UNet relative to script parent first, then config path, then download
@@ -654,8 +644,22 @@ if __name__ == "__main__":
             print(f"Custom UNet not found locally, downloading...")
             unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
         
-        state_dict = torch.load(unet_ckpt_path, map_location='cpu')
+        # Load custom UNet weights onto the pipeline's UNet (which might be on CPU initially)
+        state_dict = torch.load(unet_ckpt_path, map_location='cpu') 
         pipeline.unet.load_state_dict(state_dict, strict=True)
+        print("Custom UNet weights loaded.")
+
+        # Now, move the entire pipeline and its main components to the target device and set to half precision.
+        # This should cover all sub-modules as well.
+        pipeline = pipeline.to(device)
+        if hasattr(pipeline, 'unet') and pipeline.unet is not None:
+            pipeline.unet.to(device).half()
+        if hasattr(pipeline, 'vae') and pipeline.vae is not None:
+            pipeline.vae.to(device).half()
+        if hasattr(pipeline, 'vision_encoder') and pipeline.vision_encoder is not None:
+            pipeline.vision_encoder.to(device).half()
+        
+        print("Pipeline and components moved to device and set to half precision.")
 
         # Enable memory optimizations for diffusion pipeline
         if hasattr(pipeline, 'enable_attention_slicing'):
