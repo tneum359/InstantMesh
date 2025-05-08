@@ -424,7 +424,7 @@ def process_image(args, config, model_config, infer_config, device,
         # Convert list of PIL images to tensor
         images_tensor = torch.stack([
             torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
-            for img in images_pil
+            for img in best_candidate_images
         ]).to(device)
         
         # Create cameras for reconstruction
