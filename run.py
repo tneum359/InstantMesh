@@ -22,6 +22,7 @@ import subprocess
 import base64
 from io import BytesIO
 import shutil
+from verifiers.gemini_verifier import GeminiVerifier
 
 # --- Add InstantMesh directory to sys.path ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -166,7 +167,6 @@ def safe_to_numpy(component):
         except Exception as e:
              print(f"  Warning: Cannot convert component of type {type(component)} to numpy: {e}. Returning None.")
              return None
-# --- End Helper Function ---
 
 # --- Core Processing Function ---
 def process_image(args, config, model_config, infer_config, device, 
@@ -229,30 +229,25 @@ def process_image(args, config, model_config, infer_config, device,
         input_image_for_pipeline = input_image_pil_nobg.convert('RGB') 
 
         # --- Candidate Generation Loop ---
-        best_candidate_metadata = None
-        best_candidate_images = None
-        best_candidate_grid = None
-        best_candidate_grid_raw = None
         best_candidate_score = 0.0
+        best_candidate_images = None
         best_candidate_seed = None
+        best_candidate_metadata = None
         candidate_count = 0
-        min_candidates = 3  # Minimum number of candidates to try
-        max_candidates = args.num_candidates  # Maximum number of candidates to try
-        target_score = 8.0  # Target score to achieve
 
         # Continue generating candidates until we either:
         # 1. Get a score above target_score, or
         # 2. Reach max_candidates, or
         # 3. Have tried at least min_candidates
-        while (candidate_count < min_candidates or 
-               (best_candidate_score < target_score and candidate_count < max_candidates)):
+        while (candidate_count < args.min_candidates or 
+               (best_candidate_score < args.target_score and candidate_count < args.num_candidates)):
             
             candidate_count += 1
-            print(f"\n    --- Candidate Group {candidate_count}/{max_candidates} ---")
+            print(f"\n    --- Candidate Group {candidate_count}/{args.num_candidates} ---")
             
             # Generate a new random seed for this candidate
             candidate_seed = random.randint(0, 2**32 - 1)
-            print(f"    Generating multiview images with seed: {candidate_seed}... (Res: {args.gen_width}x{args.gen_height})")
+            print(f"    Generating multiview images with seed: {candidate_seed}...")
             
             # Set the seed for this candidate
             torch.manual_seed(candidate_seed)
@@ -260,78 +255,28 @@ def process_image(args, config, model_config, infer_config, device,
                 torch.cuda.manual_seed_all(candidate_seed)
             np.random.seed(candidate_seed)
             random.seed(candidate_seed)
-            print(f"Seed set to {candidate_seed}\n")
 
-            # Ensure input image is on the correct device and dtype
-            input_tensor = torch.from_numpy(np.array(input_image_for_pipeline)).permute(2, 0, 1).float() / 255.0
-            input_tensor = input_tensor.unsqueeze(0).to(device=device, dtype=torch.float16)
+            # Generate multiview images
+            output_image = pipeline(
+                input_image_for_pipeline, 
+                num_inference_steps=args.diffusion_steps, 
+            ).images[0]
 
-            # Generate the multiview images
-            with torch.cuda.amp.autocast():
-                output_image_pil_grid = pipeline( 
-                    input_tensor,
-                    num_inference_steps=args.diffusion_steps,
-                    width=args.gen_width,
-                    height=args.gen_height,
-                    guidance_scale=3.0,
-                ).images[0]
+            # Save the grid image
+            output_image.save(os.path.join(intermediate_dir, f'candidate_{candidate_count}_seed_{candidate_seed}.png'))
 
-            # Process the generated images
-            # Split the grid image into individual views
-            w, h = output_image_pil_grid.size
+            # Split the grid into individual views
+            w, h = output_image.size
             sub_w, sub_h = w // 2, h // 3
             images_pil = []
             for row in range(3):
                 for col in range(2):
                     box = (col * sub_w, row * sub_h, (col + 1) * sub_w, (row + 1) * sub_h)
-                    images_pil.append(output_image_pil_grid.crop(box))
-
-            images_pil_for_gemini_candidates = []
-            images_pil_for_gemini_candidates_processed = []
-            
-            for i, img in enumerate(images_pil):
-                # Convert to numpy array
-                img_np = np.array(img)
-                
-                # Remove background using rembg.remove() instead of session
-                img_np_nobg = rembg.remove(img_np, session=rembg_session)
-                
-                # Convert back to PIL
-                img_pil_nobg = Image.fromarray(img_np_nobg)
-                
-                # Resize to match input image
-                img_pil_nobg_resized = img_pil_nobg.resize((input_image_pil_nobg.size[0], input_image_pil_nobg.size[1]))
-                
-                # Convert to numpy array
-                img_np_nobg_resized = np.array(img_pil_nobg_resized)
-                
-                # Convert to RGB if needed
-                if img_np_nobg_resized.shape[2] == 4:
-                    img_np_nobg_resized = img_np_nobg_resized[:, :, :3]
-                
-                # Convert back to PIL
-                img_pil_nobg_resized = Image.fromarray(img_np_nobg_resized)
-                
-                # Save processed image
-                img_pil_nobg_resized.save(os.path.join(intermediate_dir, f"processed_view_{i}_seed_{candidate_seed}.png"))
-                
-                # Add to lists
-                images_pil_for_gemini_candidates.append(img_pil_nobg_resized)
-                images_pil_for_gemini_candidates_processed.append(img_np_nobg_resized)
-
-            # Create a grid of the processed images
-            grid_img = create_image_grid(images_pil_for_gemini_candidates_processed)
-            grid_img_pil = Image.fromarray(grid_img)
-            grid_img_pil.save(os.path.join(intermediate_dir, f"multiview_grid_processed_seed_{candidate_seed}.png"))
-            
-            # Create a grid of the raw images
-            grid_img_raw = create_image_grid([np.array(img) for img in images_pil])
-            grid_img_raw_pil = Image.fromarray(grid_img_raw)
-            grid_img_raw_pil.save(os.path.join(intermediate_dir, f"multiview_grid_raw_seed_{candidate_seed}.png"))
+                    images_pil.append(output_image.crop(box))
 
             # Score with Gemini if available
             if gemini_verifier is not None:
-                print("    Preparing data for Gemini scoring (Original + Candidate Set)...")
+                print("    Preparing data for Gemini scoring...")
                 
                 # Convert original input image to base64
                 original_img_bytes = BytesIO()
@@ -340,7 +285,7 @@ def process_image(args, config, model_config, infer_config, device,
                 
                 # Convert candidate images to base64
                 candidate_views_b64 = []
-                for img in images_pil_for_gemini_candidates:
+                for img in images_pil:
                     img_bytes = BytesIO()
                     img.save(img_bytes, format='PNG')
                     img_b64 = base64.b64encode(img_bytes.getvalue()).decode('utf-8')
@@ -368,9 +313,7 @@ def process_image(args, config, model_config, infer_config, device,
                             "score": candidate_score,
                             "gemini_scores": gemini_result["result"]
                         }
-                        best_candidate_images = images_pil_for_gemini_candidates
-                        best_candidate_grid = grid_img
-                        best_candidate_grid_raw = grid_img_raw
+                        best_candidate_images = images_pil
                         print(f"    New best group found (Score: {candidate_score:.4f}) Seed: {candidate_seed}")
                 else:
                     print(f"    Warning: Gemini evaluation failed for candidate {candidate_count}: {gemini_result['error']}")
@@ -381,37 +324,27 @@ def process_image(args, config, model_config, infer_config, device,
                             "score": 0.0,
                             "gemini_scores": None
                         }
-                        best_candidate_images = images_pil_for_gemini_candidates
-                        best_candidate_grid = grid_img
-                        best_candidate_grid_raw = grid_img_raw
+                        best_candidate_images = images_pil
                         best_candidate_seed = candidate_seed
                         print(f"    Using candidate as best (no score) Seed: {candidate_seed}")
 
             # Print progress towards target score
             if gemini_verifier is not None:
-                print(f"    Current best score: {best_candidate_score:.4f} (Target: {target_score})")
-                if best_candidate_score >= target_score:
+                print(f"    Current best score: {best_candidate_score:.4f} (Target: {args.target_score})")
+                if best_candidate_score >= args.target_score:
                     print(f"    Target score achieved! Stopping candidate generation.")
-                elif candidate_count >= max_candidates:
-                    print(f"    Reached maximum number of candidates ({max_candidates}).")
-                elif candidate_count < min_candidates:
-                    print(f"    Continuing to meet minimum candidate requirement ({min_candidates}).")
+                elif candidate_count >= args.num_candidates:
+                    print(f"    Reached maximum number of candidates ({args.num_candidates}).")
+                elif candidate_count < args.min_candidates:
+                    print(f"    Continuing to meet minimum candidate requirement ({args.min_candidates}).")
 
         # After the loop, save the best candidate's outputs
         if best_candidate_metadata is not None:
             print(f"  Selected best group (Seed: {best_candidate_seed}, Score: {best_candidate_score:.4f})")
             
-            # Save best candidate's processed views
+            # Save best candidate's views
             for i, img in enumerate(best_candidate_images):
-                img.save(os.path.join(intermediate_dir, f"best_processed_view_{i}_seed_{best_candidate_seed}.png"))
-            
-            # Save best candidate's processed grid
-            best_grid_pil = Image.fromarray(best_candidate_grid)
-            best_grid_pil.save(os.path.join(intermediate_dir, f"best_multiview_grid_processed_seed_{best_candidate_seed}.png"))
-            
-            # Save best candidate's raw grid
-            best_grid_raw_pil = Image.fromarray(best_candidate_grid_raw)
-            best_grid_raw_pil.save(os.path.join(intermediate_dir, f"best_multiview_grid_raw_seed_{best_candidate_seed}.png"))
+                img.save(os.path.join(intermediate_dir, f'best_view_{i}_seed_{best_candidate_seed}.png'))
             
             # Save best candidate's metadata
             with open(os.path.join(intermediate_dir, "best_candidate_metadata.json"), "w") as f:
@@ -422,122 +355,127 @@ def process_image(args, config, model_config, infer_config, device,
                 with open(os.path.join(intermediate_dir, "best_candidate_gemini_scores.json"), "w") as f:
                     json.dump(best_candidate_metadata["gemini_scores"], f, indent=2)
 
-        # --- Reconstruction Step (using best_group_images_tensor) ---
-        print("  Starting reconstruction...")
-        print("  Generating triplanes...")
-        
-        # Clear CUDA cache before reconstruction
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-        
-        # Resize images to a smaller size for reconstruction
-        target_size = (512, 512)  # Reduced from 2048x2048
-        resized_images = []
-        for img in best_candidate_images:
-            resized_img = img.resize(target_size, Image.Resampling.LANCZOS)
-            resized_images.append(resized_img)
-        
-        # Convert list of PIL images to tensor
-        images_tensor = torch.stack([
-            torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
-            for img in resized_images
-        ]).to(device)
-        
-        # Create cameras for reconstruction
-        base_input_cameras = get_zero123plus_input_cameras(batch_size=1, radius=4.0*args.scale)
-        current_input_cameras = base_input_cameras
-        if args.view == 4:
-            print("  Selecting 4 views for reconstruction...")
-            indices = torch.tensor([0, 2, 4, 5]).long()  # Standard 4 views
-            images_tensor = images_tensor[indices]
-            current_input_cameras = base_input_cameras[:, indices]  # Select corresponding cameras
-        current_input_cameras = current_input_cameras.to(device)
-        
-        # Enable gradient checkpointing if available
-        if hasattr(model, 'encoder') and hasattr(model.encoder, 'gradient_checkpointing_enable'):
-            model.encoder.gradient_checkpointing_enable()
-        
-        # Generate triplanes with memory optimization
-        with torch.cuda.amp.autocast():  # Use automatic mixed precision
-            planes = model.to(device).forward_planes(images_tensor, current_input_cameras)
-        
-        # Clear memory after triplane generation
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-        
-        # Generate mesh
-        print("  Generating mesh...")
-        mesh_out = model.extract_mesh(
-            planes,
-            use_texture_map=args.export_texmap,
-            **infer_config,
-        )
-        print(f"  Saving mesh to {output_obj_path} (temp name)... ")
-        if args.export_texmap:
-            # Check if mesh_out has the expected components
-            if len(mesh_out) == 5:
-                vertices, faces, uvs, mesh_tex_idx, tex_map = mesh_out
-                # Apply safe_to_numpy to each component needed for save_obj_with_mtl
-                verts_np = safe_to_numpy(vertices)
-                uvs_np = safe_to_numpy(uvs) 
-                faces_np = safe_to_numpy(faces)
-                mesh_tex_idx_np = safe_to_numpy(mesh_tex_idx)
-                tex_map_np = safe_to_numpy(tex_map.permute(1, 2, 0)) # Handle permute if tex_map is tensor
-                if verts_np is None or uvs_np is None or faces_np is None or mesh_tex_idx_np is None or tex_map_np is None:
-                    print(f"  Error: Failed to convert one or more mesh components to NumPy. Cannot save OBJ.")
-                else:
-                    save_obj_with_mtl(verts_np, uvs_np, faces_np, mesh_tex_idx_np, tex_map_np, output_obj_path)
-            else:
-                print("  Warning: export_texmap requested but mesh output format unexpected. Saving with vertex colors.")
-                vertices, faces, vertex_colors = mesh_out # Fallback assuming vertex colors
-                # --- Use Safe Conversion Function --- 
-                verts_np = safe_to_numpy(vertices)
-                faces_np = safe_to_numpy(faces)
-                colors_np = safe_to_numpy(vertex_colors)
+            # Convert best candidate images to tensor format for reconstruction
+            images = []
+            for img in best_candidate_images:
+                img_np = np.asarray(img, dtype=np.float32) / 255.0
+                img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous().float()
+                images.append(img_tensor)
+            images = torch.stack(images)
 
-                if verts_np is None or faces_np is None or colors_np is None:
-                    print(f"  Error: Failed to convert one or more mesh components to NumPy. Cannot save OBJ.")
+            # --- Reconstruction Step (using best_group_images_tensor) ---
+            print("  Starting reconstruction...")
+            print("  Generating triplanes...")
+            
+            # Clear CUDA cache before reconstruction
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
+            # Resize images to a smaller size for reconstruction
+            target_size = (512, 512)  # Reduced from 2048x2048
+            resized_images = []
+            for img in images:
+                resized_img = img.unsqueeze(0).permute(0, 2, 3, 1).resize(target_size, Image.Resampling.LANCZOS)
+                resized_images.append(resized_img)
+            
+            # Convert list of PIL images to tensor
+            images_tensor = torch.stack(resized_images).permute(0, 3, 1, 2).to(device)
+            
+            # Create cameras for reconstruction
+            base_input_cameras = get_zero123plus_input_cameras(batch_size=1, radius=4.0*args.scale)
+            current_input_cameras = base_input_cameras
+            if args.view == 4:
+                print("  Selecting 4 views for reconstruction...")
+                indices = torch.tensor([0, 2, 4, 5]).long()  # Standard 4 views
+                images_tensor = images_tensor[indices]
+                current_input_cameras = base_input_cameras[:, indices]  # Select corresponding cameras
+            current_input_cameras = current_input_cameras.to(device)
+            
+            # Enable gradient checkpointing if available
+            if hasattr(model, 'encoder') and hasattr(model.encoder, 'gradient_checkpointing_enable'):
+                model.encoder.gradient_checkpointing_enable()
+            
+            # Generate triplanes with memory optimization
+            with torch.cuda.amp.autocast():  # Use automatic mixed precision
+                planes = model.to(device).forward_planes(images_tensor, current_input_cameras)
+            
+            # Clear memory after triplane generation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
+            # Generate mesh
+            print("  Generating mesh...")
+            mesh_out = model.extract_mesh(
+                planes,
+                use_texture_map=args.export_texmap,
+                **infer_config,
+            )
+            print(f"  Saving mesh to {output_obj_path} (temp name)... ")
+            if args.export_texmap:
+                # Check if mesh_out has the expected components
+                if len(mesh_out) == 5:
+                    vertices, faces, uvs, mesh_tex_idx, tex_map = mesh_out
+                    # Apply safe_to_numpy to each component needed for save_obj_with_mtl
+                    verts_np = safe_to_numpy(vertices)
+                    uvs_np = safe_to_numpy(uvs) 
+                    faces_np = safe_to_numpy(faces)
+                    mesh_tex_idx_np = safe_to_numpy(mesh_tex_idx)
+                    tex_map_np = safe_to_numpy(tex_map.permute(1, 2, 0)) # Handle permute if tex_map is tensor
+                    if verts_np is None or uvs_np is None or faces_np is None or mesh_tex_idx_np is None or tex_map_np is None:
+                        print(f"  Error: Failed to convert one or more mesh components to NumPy. Cannot save OBJ.")
+                    else:
+                        save_obj_with_mtl(verts_np, uvs_np, faces_np, mesh_tex_idx_np, tex_map_np, output_obj_path)
                 else:
-                    # Handle potential shape mismatch if color conversion failed differently
-                    if colors_np.shape[0] != verts_np.shape[0]:
-                         print(f"  Warning: Vertex and color array lengths mismatch ({verts_np.shape[0]} vs {colors_np.shape[0]}). Using fallback gray.")
-                         colors_np = np.ones_like(verts_np) * 0.5
-                    save_obj(verts_np, faces_np, colors_np, output_obj_path)
+                    print("  Warning: export_texmap requested but mesh output format unexpected. Saving with vertex colors.")
+                    vertices, faces, vertex_colors = mesh_out # Fallback assuming vertex colors
+                    # --- Use Safe Conversion Function --- 
+                    verts_np = safe_to_numpy(vertices)
+                    faces_np = safe_to_numpy(faces)
+                    colors_np = safe_to_numpy(vertex_colors)
 
-        else:
-            # Ensure mesh_out has vertex colors
-            if len(mesh_out) == 3:
-                 vertices, faces, vertex_colors = mesh_out
-                 # --- Use Safe Conversion Function --- 
-                 verts_np = safe_to_numpy(vertices)
-                 faces_np = safe_to_numpy(faces)
-                 
-                 if verts_np is None or faces_np is None:
-                      print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
-                 else:
-                     colors_np = safe_to_numpy(vertex_colors)
-                     if colors_np is None:
-                         print(f"  Warning: Failed to convert vertex_colors to NumPy. Using fallback gray.")
-                         colors_np = np.ones_like(verts_np) * 0.5
-                     save_obj(verts_np, faces_np, colors_np, output_obj_path)
+                    if verts_np is None or faces_np is None or colors_np is None:
+                        print(f"  Error: Failed to convert one or more mesh components to NumPy. Cannot save OBJ.")
+                    else:
+                        # Handle potential shape mismatch if color conversion failed differently
+                        if colors_np.shape[0] != verts_np.shape[0]:
+                             print(f"  Warning: Vertex and color array lengths mismatch ({verts_np.shape[0]} vs {colors_np.shape[0]}). Using fallback gray.")
+                             colors_np = np.ones_like(verts_np) * 0.5
+                        save_obj(verts_np, faces_np, colors_np, output_obj_path)
+
             else:
-                 print("  Warning: Vertex colors expected but mesh output format unexpected. Saving without colors.")
-                 # Handle cases where only vertices and faces might be returned
-                 if len(mesh_out) == 2:
-                      vertices, faces = mesh_out
-                      # --- Use Safe Conversion Function --- 
-                      verts_np = safe_to_numpy(vertices)
-                      faces_np = safe_to_numpy(faces)
-                      
-                      if verts_np is None or faces_np is None:
-                           print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
-                      else:
-                          dummy_colors = np.ones_like(verts_np) * 0.5 # Gray
-                          save_obj(verts_np, faces_np, dummy_colors, output_obj_path)
-                 else:
-                      print(f"  Error: Unexpected number of items ({len(mesh_out)}) returned by extract_mesh. Cannot save OBJ.")
+                # Ensure mesh_out has vertex colors
+                if len(mesh_out) == 3:
+                     vertices, faces, vertex_colors = mesh_out
+                     # --- Use Safe Conversion Function --- 
+                     verts_np = safe_to_numpy(vertices)
+                     faces_np = safe_to_numpy(faces)
+                     
+                     if verts_np is None or faces_np is None:
+                          print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
+                     else:
+                         colors_np = safe_to_numpy(vertex_colors)
+                         if colors_np is None:
+                             print(f"  Warning: Failed to convert vertex_colors to NumPy. Using fallback gray.")
+                             colors_np = np.ones_like(verts_np) * 0.5
+                         save_obj(verts_np, faces_np, colors_np, output_obj_path)
+                else:
+                     print("  Warning: Vertex colors expected but mesh output format unexpected. Saving without colors.")
+                     # Handle cases where only vertices and faces might be returned
+                     if len(mesh_out) == 2:
+                          vertices, faces = mesh_out
+                          # --- Use Safe Conversion Function --- 
+                          verts_np = safe_to_numpy(vertices)
+                          faces_np = safe_to_numpy(faces)
+                          
+                          if verts_np is None or faces_np is None:
+                               print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
+                          else:
+                              dummy_colors = np.ones_like(verts_np) * 0.5 # Gray
+                              save_obj(verts_np, faces_np, dummy_colors, output_obj_path)
+                     else:
+                          print(f"  Error: Unexpected number of items ({len(mesh_out)}) returned by extract_mesh. Cannot save OBJ.")
 
             
             # --- Rename the saved OBJ ---
@@ -574,7 +512,9 @@ if __name__ == "__main__":
     parser.add_argument('--no_rembg', action='store_true', help='Do not remove input background.')
     parser.add_argument('--export_texmap', action='store_true', help='Export a mesh with texture map.')
     parser.add_argument('--save_video', action='store_true', help='Save a circular-view video (Not fully supported in batch mode).')
-    parser.add_argument('--num_candidates', type=int, default=1, help='Number of candidate groups for Gemini scoring (if > 1).')
+    parser.add_argument('--num_candidates', type=int, default=8, help='Maximum number of candidates to generate.')
+    parser.add_argument('--min_candidates', type=int, default=3, help='Minimum number of candidates to generate.')
+    parser.add_argument('--target_score', type=float, default=8.0, help='Target score to achieve.')
     parser.add_argument('--gemini_prompt', type=str, default=None, help='Prompt for Gemini verifier.')
     parser.add_argument('--gen_width', type=int, default=640, help='Width for multiview generation.')
     parser.add_argument('--gen_height', type=int, default=960, help='Height for multiview generation.')
@@ -730,7 +670,7 @@ if __name__ == "__main__":
             except ImportError:
                  print("Warning: verifiers.gemini_verifier not found. Gemini scoring disabled.")
             except Exception as e:
-                print(f"Error initializing Gemini Verifier: {e}. Gemini scoring disabled.")
+                print(f"Error initializing Gemini Verifier: {e}. Proceeding without Gemini scoring.")
         else:
             print("Warning: GEMINI_API_KEY not found. Gemini scoring disabled.")
     else:
