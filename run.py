@@ -622,11 +622,11 @@ if __name__ == "__main__":
     pipeline = None
     try:
         print('Loading diffusion model ...')
-        # Load the pipeline in full float32 precision, using correct custom_pipeline name
+        # Load the pipeline using full custom pipeline name and float16 hint
         pipeline = DiffusionPipeline.from_pretrained(
             "sudo-ai/zero123plus-v1.2", 
-            custom_pipeline="zero123plus", # Changed back to match original
-            # torch_dtype=torch.float16, # Removed for float32
+            custom_pipeline="sudo-ai/zero123plus-pipeline", # Changed back to full name
+            torch_dtype=torch.float16, # Re-added float16 hint
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
             pipeline.scheduler.config, timestep_spacing='trailing'
@@ -647,15 +647,17 @@ if __name__ == "__main__":
         
         # Load custom UNet weights onto the CPU UNet
         state_dict = torch.load(unet_ckpt_path, map_location='cpu') 
+        # Ensure UNet is compatible before loading state_dict (should be float32 on CPU here)
         pipeline.unet.load_state_dict(state_dict, strict=True) 
         print("Custom UNet weights loaded.")
 
         # Move the entire pipeline to the target device.
+        # Rely on torch_dtype hint and pipeline.to() for now
         pipeline = pipeline.to(device)
         print("Pipeline moved to device.")
 
-        # No explicit .half() calls or parameter forcing needed for float32
-        print("Pipeline components processed for device (using float32).")
+        # Keep explicit .half() calls and parameter forcing commented out for now
+        print("Pipeline components processed for device (using float16 hint).")
 
         # Enable memory optimizations for diffusion pipeline
         if hasattr(pipeline, 'enable_attention_slicing'):
