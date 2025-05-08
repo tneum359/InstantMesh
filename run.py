@@ -647,17 +647,34 @@ if __name__ == "__main__":
         
         # Load custom UNet weights onto the CPU UNet
         state_dict = torch.load(unet_ckpt_path, map_location='cpu') 
-        # Ensure UNet is compatible before loading state_dict (should be float32 on CPU here)
+        # Ensure UNet is compatible before loading state_dict (should be float16 on CPU here if hint worked)
         pipeline.unet.load_state_dict(state_dict, strict=True) 
         print("Custom UNet weights loaded.")
 
-        # Move the entire pipeline to the target device.
-        # Rely on torch_dtype hint and pipeline.to() for now
+        # Move the entire pipeline to the target device first.
         pipeline = pipeline.to(device)
         print("Pipeline moved to device.")
 
-        # Keep explicit .half() calls and parameter forcing commented out for now
-        print("Pipeline components processed for device (using float16 hint).")
+        # Explicitly set components to half and force parameters
+        if hasattr(pipeline, 'unet') and pipeline.unet is not None:
+            pipeline.unet.half() # Convert module to half
+            for param in pipeline.unet.parameters():
+                param.data = param.data.to(device).half() # Force params
+            print("UNet set to half and parameters forced.")
+
+        if hasattr(pipeline, 'vae') and pipeline.vae is not None:
+            pipeline.vae.half() # Convert module to half
+            for param in pipeline.vae.parameters():
+               param.data = param.data.to(device).half() # Force params
+            print("VAE set to half and parameters forced.")
+
+        if hasattr(pipeline, 'vision_encoder') and pipeline.vision_encoder is not None:
+            pipeline.vision_encoder.half() # Convert module to half
+            for param in pipeline.vision_encoder.parameters():
+               param.data = param.data.to(device).half() # Force params
+            print("Vision Encoder set to half and parameters forced.")
+        
+        print("Pipeline components processed for device and dtype.")
 
         # Enable memory optimizations for diffusion pipeline
         if hasattr(pipeline, 'enable_attention_slicing'):
