@@ -242,7 +242,15 @@ def process_image(args, config, model_config, infer_config, device,
             ).images[0]
 
             # Process the generated images
-            images_pil = output_image_pil_grid.images
+            # Split the grid image into individual views
+            w, h = output_image_pil_grid.size
+            sub_w, sub_h = w // 2, h // 3
+            images_pil = []
+            for row in range(3):
+                for col in range(2):
+                    box = (col * sub_w, row * sub_h, (col + 1) * sub_w, (row + 1) * sub_h)
+                    images_pil.append(output_image_pil_grid.crop(box))
+
             images_pil_for_gemini_candidates = []
             images_pil_for_gemini_candidates_processed = []
             
