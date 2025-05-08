@@ -66,9 +66,9 @@ except ImportError:
             print(os.listdir(SCRIPT_DIR))
             print("\nContents of src/utils:")
             print(os.listdir(os.path.join(SCRIPT_DIR, 'src', 'utils')))
-        except Exception as e:
-            print(f"Could not list directories: {e}")
-        raise
+        except Exception as list_e:
+            print(f"Could not list directories: {list_e}")
+        raise e # Re-raise the original import error
 
 # --- Local utils ---
 try:
@@ -80,9 +80,10 @@ try:
     )
     from InstantMesh.src.utils.mesh_util import save_obj, save_obj_with_mtl
     from InstantMesh.src.utils.infer_util import remove_background, resize_foreground, save_video
+    print("Successfully imported from InstantMesh.src.utils")
 except ImportError as e:
-    print(f"Failed to import from InstantMesh.src.utils: {e}")
-    raise
+    # This might be expected if run directly, so don't raise, just warn.
+    print(f"Note: Failed to import from InstantMesh.src.utils: {e}") 
 
 # --- Helper: Composite RGBA over white ---
 def rgba_to_rgb_white(img):
@@ -264,16 +265,15 @@ def process_image(args, config, model_config, infer_config, device,
             random.seed(candidate_seed)
 
             # Generate multiview images
-            # Convert input image to tensor and ensure correct device/dtype
             # input_tensor = torch.from_numpy(np.array(input_image_for_pipeline)).permute(2, 0, 1).float() / 255.0
             # input_tensor = input_tensor.unsqueeze(0).to(device=device, dtype=torch.float16)
             
-            # Re-enable autocast
-            with torch.cuda.amp.autocast(): # type: ignore <-- Re-enabled
-                output_image = pipeline(
-                    input_image_for_pipeline, # Pass the PIL image directly
-                    num_inference_steps=args.diffusion_steps,
-                ).images[0]
+            # Keep autocast disabled for float32
+            # with torch.cuda.amp.autocast(): # type: ignore <-- Keep commented out
+            output_image = pipeline(
+                input_image_for_pipeline, # Pass the PIL image directly
+                num_inference_steps=args.diffusion_steps,
+            ).images[0]
 
             # Save the grid image
             output_image.save(os.path.join(intermediate_dir, f'candidate_{candidate_count}_seed_{candidate_seed}.png'))
@@ -622,11 +622,11 @@ if __name__ == "__main__":
     pipeline = None
     try:
         print('Loading diffusion model ...')
-        # Use full custom name and float16 hint
+        # Load the pipeline using full name and float32
         pipeline = DiffusionPipeline.from_pretrained(
             "sudo-ai/zero123plus-v1.2", 
             custom_pipeline="sudo-ai/zero123plus-pipeline", # Full name
-            torch_dtype=torch.float16, 
+            # torch_dtype=torch.float16, # REMOVED - Use float32
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
             pipeline.scheduler.config, timestep_spacing='trailing'
@@ -645,19 +645,19 @@ if __name__ == "__main__":
             print(f"Custom UNet not found locally, downloading...")
             unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
         
-        # Load custom UNet weights onto the CPU UNet (as in original)
+        # Load custom UNet weights onto the CPU UNet
         state_dict = torch.load(unet_ckpt_path, map_location='cpu') 
         pipeline.unet.load_state_dict(state_dict, strict=True) 
         print("Custom UNet weights loaded.")
 
-        # Move the entire pipeline to the target device (as in original)
+        # Move the entire pipeline to the target device.
         pipeline = pipeline.to(device)
         print("Pipeline moved to device.")
 
-        # REMOVED explicit .half() / param loops - Relying on autocast
-        print("Pipeline components processed for device (relying on float16 hint + autocast).")
+        # No explicit .half() calls needed
+        print("Pipeline components processed for device (using float32).")
 
-        # Enable memory optimizations (These seem fine to keep)
+        # Enable memory optimizations (Keep these)
         if hasattr(pipeline, 'enable_attention_slicing'):
             pipeline.enable_attention_slicing()
         if hasattr(pipeline, 'enable_vae_slicing'):
@@ -791,9 +791,6 @@ if __name__ == "__main__":
                       traceback.print_exc()
                       print(f"  Skipping to next image due to error.")
             else:
-                 # This message will now appear if the warning at the start wasn't triggered
-                 # (e.g., if API key exists but num_candidates=1 was somehow forced - less likely now)
-                 # Or if the loop continued despite the initial warning.
                  print(f"  [{img_name}] Skipping: Gemini pass required but not available/enabled for this run.")
 
         print("--- Batch processing complete. ---")
