@@ -624,22 +624,22 @@ if __name__ == "__main__":
         pipeline = DiffusionPipeline.from_pretrained(
             "sudo-ai/zero123plus-v1.2", 
             custom_pipeline="sudo-ai/zero123plus-pipeline",
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float16, # Hint to load in float16 if possible
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
             pipeline.scheduler.config, timestep_spacing='trailing'
         )
 
-        # Move all pipeline components to device and ensure consistent dtype
+        # Move the main pipeline object to the device
         pipeline = pipeline.to(device)
-        pipeline.unet = pipeline.unet.to(device)
-        pipeline.vae = pipeline.vae.to(device)
-        pipeline.vision_encoder = pipeline.vision_encoder.to(device)
 
-        # Ensure all components use float16
-        pipeline.unet = pipeline.unet.half()
-        pipeline.vae = pipeline.vae.half()
-        pipeline.vision_encoder = pipeline.vision_encoder.half()
+        # For major sub-components, explicitly set to half precision and move to device
+        if hasattr(pipeline, 'unet') and pipeline.unet is not None:
+            pipeline.unet = pipeline.unet.half().to(device)
+        if hasattr(pipeline, 'vae') and pipeline.vae is not None:
+            pipeline.vae = pipeline.vae.half().to(device)
+        if hasattr(pipeline, 'vision_encoder') and pipeline.vision_encoder is not None:
+            pipeline.vision_encoder = pipeline.vision_encoder.half().to(device)
 
         print('Loading custom white-background unet ...')
         # Try finding UNet relative to script parent first, then config path, then download
