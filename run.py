@@ -258,8 +258,8 @@ def process_image(args, config, model_config, infer_config, device,
                 # Convert to numpy array
                 img_np = np.array(img)
                 
-                # Remove background
-                img_np_nobg = rembg_session.remove(img_np)
+                # Remove background using rembg.remove() instead of session
+                img_np_nobg = rembg.remove(img_np, session=rembg_session)
                 
                 # Convert back to PIL
                 img_pil_nobg = Image.fromarray(img_np_nobg)
