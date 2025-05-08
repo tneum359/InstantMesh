@@ -621,11 +621,11 @@ if __name__ == "__main__":
     pipeline = None
     try:
         print('Loading diffusion model ...')
-        # Load the pipeline, explicitly requesting fp16 variant and float16 dtype
+        # Load the pipeline, hint float16 dtype
         pipeline = DiffusionPipeline.from_pretrained(
             "sudo-ai/zero123plus-v1.2", 
             custom_pipeline="sudo-ai/zero123plus-pipeline",
-            variant="fp16",  # Request fp16 variant if available
+            # variant="fp16", # Removed: Variant doesn't exist
             torch_dtype=torch.float16, 
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
@@ -636,7 +636,7 @@ if __name__ == "__main__":
         # Try finding UNet relative to script parent first, then config path, then download
         unet_path_rel = os.path.join(PARENT_DIR, "ckpts", "diffusion_pytorch_model.bin") 
         if os.path.exists(infer_config.unet_path):
-            unet_ckpt_path = infer_config.unet_path # Allow override from config
+            unet_ckpt_path = infer_config.unet_path 
             print(f"  Using UNet from config: {unet_ckpt_path}")
         elif os.path.exists(unet_path_rel):
             unet_ckpt_path = unet_path_rel
@@ -645,21 +645,35 @@ if __name__ == "__main__":
             print(f"Custom UNet not found locally, downloading...")
             unet_ckpt_path = hf_hub_download(repo_id="TencentARC/InstantMesh", filename="diffusion_pytorch_model.bin", repo_type="model")
         
-        # Load custom UNet weights. Ensure the unet is in a compatible state (e.g., CPU, float32) before loading.
-        # pipeline.unet should already be float16 if torch_dtype worked, but loading from a float32 checkpoint is fine.
+        # Load custom UNet weights onto the (likely) CPU/float32 UNet
         state_dict = torch.load(unet_ckpt_path, map_location='cpu') 
-        pipeline.unet.load_state_dict(state_dict, strict=True) # Load onto the existing unet
+        pipeline.unet.load_state_dict(state_dict, strict=True) 
         print("Custom UNet weights loaded.")
 
-        # Move the entire pipeline to the target device.
-        # The torch_dtype=torch.float16 should have handled component dtypes.
+        # Move the entire pipeline to the target device first.
         pipeline = pipeline.to(device)
         print("Pipeline moved to device.")
+
+        # Explicitly set components to half and force parameters
+        if hasattr(pipeline, 'unet') and pipeline.unet is not None:
+            pipeline.unet.half() # Convert module to half
+            for param in pipeline.unet.parameters():
+                param.data = param.data.to(device).half() # Force params
+            print("UNet set to half and parameters forced.")
+
+        if hasattr(pipeline, 'vae') and pipeline.vae is not None:
+            pipeline.vae.half() # Convert module to half
+            for param in pipeline.vae.parameters():
+               param.data = param.data.to(device).half() # Force params
+            print("VAE set to half and parameters forced.")
+
+        if hasattr(pipeline, 'vision_encoder') and pipeline.vision_encoder is not None:
+            pipeline.vision_encoder.half() # Convert module to half
+            for param in pipeline.vision_encoder.parameters():
+               param.data = param.data.to(device).half() # Force params
+            print("Vision Encoder set to half and parameters forced.")
         
-        # Optional: Verify dtypes of major components if errors persist
-        # if hasattr(pipeline, 'unet'): print(f"UNet dtype: {pipeline.unet.dtype}, device: {next(pipeline.unet.parameters()).device}")
-        # if hasattr(pipeline, 'vae'): print(f"VAE dtype: {pipeline.vae.dtype}, device: {next(pipeline.vae.parameters()).device}")
-        # if hasattr(pipeline, 'vision_encoder'): print(f"Vision Encoder dtype: {pipeline.vision_encoder.dtype}, device: {next(pipeline.vision_encoder.parameters()).device}")
+        print("Pipeline components processed for device and dtype.")
 
         # Enable memory optimizations for diffusion pipeline
         if hasattr(pipeline, 'enable_attention_slicing'):
