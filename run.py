@@ -427,8 +427,18 @@ def process_image(args, config, model_config, infer_config, device,
             for img in images_pil
         ]).to(device)
         
+        # Create cameras for reconstruction
+        base_input_cameras = get_zero123plus_input_cameras(batch_size=1, radius=4.0*args.scale)
+        current_input_cameras = base_input_cameras
+        if args.view == 4:
+            print("  Selecting 4 views for reconstruction...")
+            indices = torch.tensor([0, 2, 4, 5]).long()  # Standard 4 views
+            images_tensor = images_tensor[indices]
+            current_input_cameras = base_input_cameras[:, indices]  # Select corresponding cameras
+        current_input_cameras = current_input_cameras.to(device)
+        
         # Generate triplanes
-        planes = model.to(device).forward_planes(images_tensor, input_cameras)
+        planes = model.to(device).forward_planes(images_tensor, current_input_cameras)
         
         # Generate mesh
         print("  Generating mesh...")
