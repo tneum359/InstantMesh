@@ -49,14 +49,14 @@ try:
 except ImportError:
     try:
         # Try with src prefix
-from src.utils.train_util import instantiate_from_config
-from src.utils.camera_util import (
-    FOV_to_intrinsics, 
-    get_zero123plus_input_cameras,
-    get_circular_camera_poses,
-)
-from src.utils.mesh_util import save_obj, save_obj_with_mtl
-from src.utils.infer_util import remove_background, resize_foreground, save_video
+        from src.utils.train_util import instantiate_from_config
+        from src.utils.camera_util import (
+            FOV_to_intrinsics, 
+            get_zero123plus_input_cameras,
+            get_circular_camera_poses,
+        )
+        from src.utils.mesh_util import save_obj, save_obj_with_mtl
+        from src.utils.infer_util import remove_background, resize_foreground, save_video
         print("Successfully imported from src.utils")
     except ImportError as e:
         print(f"Failed to import required modules. Error: {e}")
@@ -71,14 +71,18 @@ from src.utils.infer_util import remove_background, resize_foreground, save_vide
         raise
 
 # --- Local utils ---
-from InstantMesh.src.utils.train_util import instantiate_from_config
-from InstantMesh.src.utils.camera_util import (
-    FOV_to_intrinsics, 
-    get_zero123plus_input_cameras,
-    get_circular_camera_poses,
-)
-from InstantMesh.src.utils.mesh_util import save_obj, save_obj_with_mtl
-from InstantMesh.src.utils.infer_util import remove_background, resize_foreground, save_video
+try:
+    from InstantMesh.src.utils.train_util import instantiate_from_config
+    from InstantMesh.src.utils.camera_util import (
+        FOV_to_intrinsics, 
+        get_zero123plus_input_cameras,
+        get_circular_camera_poses,
+    )
+    from InstantMesh.src.utils.mesh_util import save_obj, save_obj_with_mtl
+    from InstantMesh.src.utils.infer_util import remove_background, resize_foreground, save_video
+except ImportError as e:
+    print(f"Failed to import from InstantMesh.src.utils: {e}")
+    raise
 
 # --- Helper: Composite RGBA over white ---
 def rgba_to_rgb_white(img):
