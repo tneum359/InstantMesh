@@ -421,10 +421,21 @@ def process_image(args, config, model_config, infer_config, device,
         print("  Starting reconstruction...")
         print("  Generating triplanes...")
         
+        # Clear CUDA cache before reconstruction
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Resize images to a smaller size for reconstruction
+        target_size = (512, 512)  # Reduced from 2048x2048
+        resized_images = []
+        for img in best_candidate_images:
+            resized_img = img.resize(target_size, Image.Resampling.LANCZOS)
+            resized_images.append(resized_img)
+        
         # Convert list of PIL images to tensor
         images_tensor = torch.stack([
             torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
-            for img in best_candidate_images
+            for img in resized_images
         ]).to(device)
         
         # Create cameras for reconstruction
@@ -437,8 +448,17 @@ def process_image(args, config, model_config, infer_config, device,
             current_input_cameras = base_input_cameras[:, indices]  # Select corresponding cameras
         current_input_cameras = current_input_cameras.to(device)
         
-        # Generate triplanes
-        planes = model.to(device).forward_planes(images_tensor, current_input_cameras)
+        # Enable gradient checkpointing if available
+        if hasattr(model, 'encoder') and hasattr(model.encoder, 'gradient_checkpointing_enable'):
+            model.encoder.gradient_checkpointing_enable()
+        
+        # Generate triplanes with memory optimization
+        with torch.cuda.amp.autocast():  # Use automatic mixed precision
+            planes = model.to(device).forward_planes(images_tensor, current_input_cameras)
+        
+        # Clear memory after triplane generation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         # Generate mesh
         print("  Generating mesh...")
