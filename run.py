@@ -530,7 +530,7 @@ if __name__ == "__main__":
     loaded_gemini_prompt = None
 
     # Load prompt text first, regardless of how verifier is instantiated
-    prompt_file_path = os.path.join(PARENT_DIR, "verifiers", "prompt.txt") 
+    prompt_file_path = os.path.join(PARENT_DIR, "verifiers", "verifier_prompt.txt")
     print(f"--- DEBUG: Attempting to load Gemini prompt from file: {prompt_file_path} ---")
     if os.path.exists(prompt_file_path):
         try:
