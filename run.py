@@ -510,9 +510,57 @@ if __name__ == "__main__":
     print("--- DEBUG: About to load config and model. ---")
     config = OmegaConf.load(args.config)
     model_config = OmegaConf.load(args.model)
-    gemini_verifier = instantiate_from_config(config.gemini_verifier)
-    rembg_session = rembg.load_from_file(args.rembg_session) if args.rembg_session else None
-    infer_config = config.infer_config
+    
+    gemini_verifier_instance = None
+    gemini_active_for_run = False
+    if args.max_candidates > 0: # User intends to use Gemini if max_candidates is set
+        try:
+            # Assuming config.gemini_verifier is a config block for instantiation
+            # Or args.gemini_verifier is a direct path to be handled by instantiate_from_config
+            # This part depends on how instantiate_from_config is designed for verifiers
+            print(f"--- DEBUG: Attempting to instantiate Gemini Verifier from: {args.gemini_verifier} or config...")
+            # Prioritize args.gemini_verifier if it's meant to be a path to a config for the verifier
+            # This logic might need adjustment based on what args.gemini_verifier represents.
+            # For now, let's assume instantiate_from_config can handle it or it's in the main config.
+            if hasattr(config, 'gemini_verifier_config_path'): # Example if verifier config is separate
+                 verifier_config_actual = OmegaConf.load(config.gemini_verifier_config_path)
+                 gemini_verifier_instance = instantiate_from_config(verifier_config_actual)
+            elif hasattr(config, 'gemini_verifier'): # Example if verifier config is embedded
+                 gemini_verifier_instance = instantiate_from_config(config.gemini_verifier)
+            else: # Fallback if args.gemini_verifier itself is the config or points to it
+                 # This assumes args.gemini_verifier is a path to a file loadable by OmegaConf
+                 # or directly a config object if instantiate_from_config is versatile.
+                 # If instantiate_from_config expects a dict/OmegaConf object:
+                 try:
+                    verifier_conf_from_arg = OmegaConf.load(args.gemini_verifier) 
+                    gemini_verifier_instance = instantiate_from_config(verifier_conf_from_arg)
+                 except Exception as e_gv_load:
+                    print(f"--- DEBUG: Could not load args.gemini_verifier as OmegaConf ({e_gv_load}), trying as direct init for GeminiVerifier class if applicable.")
+                    # If GeminiVerifier is a class we can directly init with a prompt path or API key
+                    # This part requires knowing how your GeminiVerifier class is structured.
+                    # For now, this is a placeholder for a more direct instantiation if OmegaConf fails.
+                    # from verifiers.gemini_verifier import GeminiVerifier # Make sure this is importable
+                    # gemini_verifier_instance = GeminiVerifier(prompt_path=args.gemini_prompt_path_if_any)
+                    print(f"--- WARNING: Gemini Verifier direct instantiation logic not fully implemented here. It might fail.")
+
+            if gemini_verifier_instance:
+                print("--- DEBUG: Gemini Verifier instantiated successfully. ---")
+                # Validate min_candidates against max_candidates for Gemini run
+                if args.min_candidates <= 0: args.min_candidates = 1
+                if args.min_candidates > args.max_candidates:
+                    print(f"  WARNING: min_candidates ({args.min_candidates}) > max_candidates ({args.max_candidates}). Setting min_candidates to {args.max_candidates}.")
+                    args.min_candidates = args.max_candidates
+                gemini_active_for_run = True
+            else:
+                print("--- WARNING: Gemini Verifier could not be instantiated. Gemini pass disabled. ---")
+        except Exception as e:
+            print(f"--- ERROR: Failed to instantiate Gemini Verifier: {e}. Gemini pass disabled. ---")
+            traceback.print_exc()
+    else:
+        print("--- DEBUG: max_candidates is 0, Gemini pass will be disabled. ---")
+
+    rembg_session = rembg.load_from_file(args.rembg_session) if args.rembg_session else None # This seems fine
+    infer_config = config.infer_config # This seems fine
 
     print("--- DEBUG: About to create device and pipeline. ---")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -522,5 +570,43 @@ if __name__ == "__main__":
     model.to(device)
 
     print("--- DEBUG: About to process images. ---")
-    for input_image_path in glob(config.data.image_paths):
-        process_image(args, config, model_config, infer_config, device, pipeline, model, gemini_verifier, rembg_session, None, input_image_path, config.data.intermediate_dir, config.data.output_dir, False)
+    # Determine the base intermediate and output directories from the main config
+    # These might be overridden if the specific image processing logic generates per-image subdirs
+    base_intermediate_dir = config.data.intermediate_dir
+    base_output_dir = config.data.output_dir
+    os.makedirs(base_intermediate_dir, exist_ok=True)
+    os.makedirs(base_output_dir, exist_ok=True)
+
+    image_paths_to_process = []
+    if os.path.isfile(config.data.image_paths): # If it's a single file path
+        image_paths_to_process.append(config.data.image_paths)
+    elif os.path.isdir(config.data.image_paths): # If it's a directory
+        image_paths_to_process.extend(sorted(glob.glob(os.path.join(config.data.image_paths, '*.png'))))
+        image_paths_to_process.extend(sorted(glob.glob(os.path.join(config.data.image_paths, '*.jpg'))))
+        image_paths_to_process.extend(sorted(glob.glob(os.path.join(config.data.image_paths, '*.jpeg'))))
+    else: # Assume it might be a glob pattern itself if not a file or directory
+        image_paths_to_process.extend(sorted(glob.glob(config.data.image_paths)))
+    
+    if not image_paths_to_process:
+        print(f"--- ERROR: No images found based on config.data.image_paths: {config.data.image_paths} ---")
+        exit(1)
+
+    print(f"--- DEBUG: Found {len(image_paths_to_process)} image(s) to process. Gemini active for run: {gemini_active_for_run} ---")
+
+    for input_image_path in image_paths_to_process:
+        # Create per-image subdirectories for outputs if needed, or use base_output_dir directly
+        img_name_base = os.path.splitext(os.path.basename(input_image_path))[0]
+        # Example: per-image subdirectories. Adjust if your process_image expects flat output.
+        current_intermediate_dir = os.path.join(base_intermediate_dir, img_name_base)
+        current_output_dir = os.path.join(base_output_dir, img_name_base)
+        os.makedirs(current_intermediate_dir, exist_ok=True)
+        os.makedirs(current_output_dir, exist_ok=True)
+
+        process_image(args, config, model_config, infer_config, device, pipeline, model, 
+                      gemini_verifier_instance, # Pass the instantiated verifier
+                      rembg_session, 
+                      None, # input_cameras - assuming process_image handles this or it's not used by this version
+                      input_image_path, 
+                      current_intermediate_dir, # Pass per-image intermediate dir
+                      current_output_dir,     # Pass per-image output dir
+                      gemini_active_for_run)  # Pass the dynamically determined flag
