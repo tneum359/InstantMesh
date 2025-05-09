@@ -206,7 +206,9 @@ def process_image(args, config, model_config, infer_config, device,
         print(f"  Error loading or preprocessing input image {input_image_path}: {e}")
         return
 
-    input_image_for_pipeline = F.to_tensor(input_image_pil).unsqueeze(0).to(device, dtype=pipeline.dtype if hasattr(pipeline, 'dtype') else torch.float16) # Prepare for pipeline
+    # Use F.Compose for robust conversion if F is torchvision.transforms.v2
+    image_to_tensor_transform = F.Compose([F.ToImage(), F.ToDtype(torch.float32, scale=True)])
+    input_image_for_pipeline = image_to_tensor_transform(input_image_pil).unsqueeze(0).to(device, dtype=pipeline.dtype if hasattr(pipeline, 'dtype') else torch.float16) # Prepare for pipeline
 
     # --- Candidate Generation Loop ---
     best_group_score = -1.0  # Initialize with a low score
@@ -377,14 +379,16 @@ def process_image(args, config, model_config, infer_config, device,
 
         # Create and Save Processed Grid of the best candidate
         try:
-            if hasattr(F, 'ToImage'):
-                transform_pipeline = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
+            if hasattr(F, 'ToImage'): # F is torchvision.transforms.v2
+                transform_pipeline = F.Compose([F.ToImage(), F.ToDtype(torch.float32, scale=True)])
                 tensors_for_grid = [transform_pipeline(img) for img in best_group_pil_list_processed_rgb]
-            else:
-                tensors_for_grid = [F.to_tensor(img) for img in best_group_pil_list_processed_rgb]
+            else: # F is older torchvision.transforms
+                transform_pipeline = F.ToTensor() # Use ToTensor class
+                tensors_for_grid = [transform_pipeline(img) for img in best_group_pil_list_processed_rgb]
 
             if tensors_for_grid:
                 processed_grid_tensor = make_grid(tensors_for_grid, nrow=2)
+                # F.to_pil_image should be available if F is either v2 or older transforms
                 processed_grid_pil = F.to_pil_image(processed_grid_tensor)
                 processed_grid_path = os.path.join(intermediate_dir, f'best_multiview_grid_processed_seed_{best_group_seed}.png')
                 processed_grid_pil.save(processed_grid_path)
