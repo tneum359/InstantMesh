@@ -66,14 +66,14 @@ print("--- DEBUG: About to try local imports from src.utils (submodule) ---")
 try:
     from src.utils.config import instantiate_from_config
     print("--- DEBUG: Successfully imported instantiate_from_config from src.utils.config ---")
-    from src.utils.train_utils import seed_everything
-    print("--- DEBUG: Successfully imported seed_everything from src.utils.train_utils ---")
-    from src.utils.mesh_utils import save_obj, save_obj_with_mtl
-    print("--- DEBUG: Successfully imported mesh_utils (save_obj, save_obj_with_mtl) ---")
+    from src.utils.train_util import seed_everything
+    print("--- DEBUG: Successfully imported seed_everything from src.utils.train_util ---")
+    from src.utils.mesh_util import save_obj, save_obj_with_mtl
+    print("--- DEBUG: Successfully imported mesh_util (save_obj, save_obj_with_mtl) ---")
 except ImportError as e:
     print(f"--- CRITICAL DEBUG: Error importing from src.utils: {e} ---")
     print("--- CRITICAL DEBUG: This likely means that the main InstantMesh submodule or its utils are not correctly in sys.path or are missing. ---")
-    print(f"--- CRITICAL DEBUG: Check if 'InstantMesh/src/' exists and contains __init__.py files and the required modules (config.py, train_utils.py, mesh_utils.py). ---")
+    print(f"--- CRITICAL DEBUG: Check if 'InstantMesh/src/' exists and contains __init__.py files and the required modules (config.py, train_util.py, mesh_util.py). ---")
     # exit(1) # Consider exiting if these are absolutely essential before argparse
 
 print("--- DEBUG: All known imports at the top level seem to have been attempted. ---")
