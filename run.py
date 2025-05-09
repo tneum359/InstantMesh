@@ -189,7 +189,7 @@ def process_image(args, config, model_config, infer_config, device,
                     os.unlink(item_path)
                 elif os.path.isdir(item_path):
                     shutil.rmtree(item_path)
-            except Exception as e:
+    except Exception as e:
                         print(f'  Warning: Failed to delete {item_path}. Reason: {e}')
     elif not os.path.exists(intermediate_dir):
          os.makedirs(intermediate_dir, exist_ok=True) # Should already exist but defensive
@@ -385,7 +385,7 @@ def process_image(args, config, model_config, infer_config, device,
                 processed_grid_path = os.path.join(intermediate_dir, f'best_multiview_grid_processed_seed_{best_group_seed}.png')
                 processed_grid_pil.save(processed_grid_path)
                 print(f"  Saved best candidate processed grid to {processed_grid_path}")
-        except Exception as e:
+    except Exception as e:
                 print(f"  Warning: Failed to create or save processed grid for best candidate: {e}")
     
     # Save the RAW grid from the diffusion model for the best candidate (optional)
@@ -427,11 +427,11 @@ def process_image(args, config, model_config, infer_config, device,
         # Ensure model and cameras are on the correct device
         planes = model.to(device).forward_planes(images, current_input_cameras)
         print("  Extracting mesh...")
-        mesh_out = model.extract_mesh(
-            planes,
-            use_texture_map=args.export_texmap,
-            **infer_config,
-        )
+            mesh_out = model.extract_mesh(
+                planes,
+                use_texture_map=args.export_texmap,
+                **infer_config,
+            )
         print(f"  Saving mesh to {output_obj_path} (temp name)... ")
         if args.export_texmap:
             # Check if mesh_out has the expected components
