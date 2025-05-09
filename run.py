@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 from omegaconf import OmegaConf
+from pytorch_lightning import seed_everything
 
 # --- Add parent directory to sys.path ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -64,17 +65,21 @@ print("--- DEBUG: Successfully imported hf_hub_download ---")
 # --- Try Local Imports (utils, etc.) ---
 print("--- DEBUG: About to try local imports from src.utils (submodule) ---")
 try:
-    from src.utils.config import instantiate_from_config
+    print("--- DEBUG: Attempting to import 'src' package first ---")
+    import src # Try importing the top-level package first
+    print("--- DEBUG: Successfully imported 'src' package --- ")
+    
+    print("--- DEBUG: Now attempting imports from src.utils... ---")
+    from src.utils.config import instantiate_from_config 
     print("--- DEBUG: Successfully imported instantiate_from_config from src.utils.config ---")
-    from src.utils.train_util import seed_everything
-    print("--- DEBUG: Successfully imported seed_everything from src.utils.train_util ---")
+    print("--- DEBUG: Using seed_everything from pytorch_lightning (imported globally) ---")
     from src.utils.mesh_util import save_obj, save_obj_with_mtl
     print("--- DEBUG: Successfully imported mesh_util (save_obj, save_obj_with_mtl) ---")
 except ImportError as e:
-    print(f"--- CRITICAL DEBUG: Error importing from src.utils: {e} ---")
-    print("--- CRITICAL DEBUG: This likely means that the main InstantMesh submodule or its utils are not correctly in sys.path or are missing. ---")
-    print(f"--- CRITICAL DEBUG: Check if 'InstantMesh/src/' exists and contains __init__.py files and the required modules (config.py, train_util.py, mesh_util.py). ---")
-    # exit(1) # Consider exiting if these are absolutely essential before argparse
+    print(f"--- CRITICAL DEBUG: Error importing from src or src.utils: {e} ---")
+    print("--- CRITICAL DEBUG: This likely means that the main InstantMesh submodule or its utils are not correctly in sys.path or are missing __init__.py files. ---")
+    print(f"--- CRITICAL DEBUG: Check if 'InstantMesh/src/__init__.py' exists. ---")
+    # exit(1)
 
 print("--- DEBUG: All known imports at the top level seem to have been attempted. ---")
 print('--- DEBUG: Reaching helper function definitions and then \'if __name__ == "__main__":\' block. ---')
