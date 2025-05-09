@@ -20,9 +20,18 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(SCRIPT_DIR)
 print(f"--- DEBUG: Current SCRIPT_DIR: {SCRIPT_DIR}")
 print(f"--- DEBUG: Current PARENT_DIR: {PARENT_DIR}")
-sys.path.append(PARENT_DIR)
-print(f"--- DEBUG: Added {PARENT_DIR} to sys.path ---")
-print(f"--- DEBUG: Current sys.path: {sys.path}")
+
+# Add SCRIPT_DIR to allow InstantMesh/run.py to find InstantMesh/src as a top-level 'src'
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR) # Insert at the beginning
+    print(f"--- DEBUG: Inserted SCRIPT_DIR {SCRIPT_DIR} to sys.path for local src resolution ---")
+
+# Add PARENT_DIR to allow InstantMesh/run.py to find sibling packages (e.g., verifiers)
+if PARENT_DIR not in sys.path:
+    sys.path.append(PARENT_DIR)
+    print(f"--- DEBUG: Appended PARENT_DIR {PARENT_DIR} to sys.path for sibling package resolution ---")
+
+print(f"--- DEBUG: Updated sys.path: {sys.path}")
 
 print("--- DEBUG: Top-level imports seem OK. Proceeding to import specific components...")
 
