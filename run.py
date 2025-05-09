@@ -527,54 +527,84 @@ if __name__ == "__main__":
     
     gemini_verifier_instance = None
     gemini_active_for_run = False
-    if args.max_candidates > 0: # User intends to use Gemini if max_candidates is set
-        try:
-            # Assuming config.gemini_verifier is a config block for instantiation
-            # Or args.gemini_verifier is a direct path to be handled by instantiate_from_config
-            # This part depends on how instantiate_from_config is designed for verifiers
-            print(f"--- DEBUG: Attempting to instantiate Gemini Verifier from: {args.gemini_verifier} or config...")
-            # Prioritize args.gemini_verifier if it's meant to be a path to a config for the verifier
-            # This logic might need adjustment based on what args.gemini_verifier represents.
-            # For now, let's assume instantiate_from_config can handle it or it's in the main config.
-            if hasattr(config, 'gemini_verifier_config_path'): # Example if verifier config is separate
-                 verifier_config_actual = OmegaConf.load(config.gemini_verifier_config_path)
-                 gemini_verifier_instance = instantiate_from_config(verifier_config_actual)
-            elif hasattr(config, 'gemini_verifier'): # Example if verifier config is embedded
-                 gemini_verifier_instance = instantiate_from_config(config.gemini_verifier)
-            else: # Fallback if args.gemini_verifier itself is the config or points to it
-                 # This assumes args.gemini_verifier is a path to a file loadable by OmegaConf
-                 # or directly a config object if instantiate_from_config is versatile.
-                 # If instantiate_from_config expects a dict/OmegaConf object:
-                 try:
-                    verifier_conf_from_arg = OmegaConf.load(args.gemini_verifier) 
-                    gemini_verifier_instance = instantiate_from_config(verifier_conf_from_arg)
-                 except Exception as e_gv_load:
-                    print(f"--- DEBUG: Could not load args.gemini_verifier as OmegaConf ({e_gv_load}), trying as direct init for GeminiVerifier class if applicable.")
-                    # If GeminiVerifier is a class we can directly init with a prompt path or API key
-                    # This part requires knowing how your GeminiVerifier class is structured.
-                    # For now, this is a placeholder for a more direct instantiation if OmegaConf fails.
-                    # from verifiers.gemini_verifier import GeminiVerifier # Make sure this is importable
-                    # gemini_verifier_instance = GeminiVerifier(prompt_path=args.gemini_prompt_path_if_any)
-                    print(f"--- WARNING: Gemini Verifier direct instantiation logic not fully implemented here. It might fail.")
+    # Attempt to load gemini_prompt from args or fallback to file
+    loaded_gemini_prompt = None
+    if hasattr(args, 'gemini_prompt_text') and args.gemini_prompt_text: # If a direct prompt text arg is ever added
+        loaded_gemini_prompt = args.gemini_prompt_text
+        print(f"--- DEBUG: Using Gemini prompt text from command line argument.")
+    else:
+        # Default path for the prompt file relative to PARENT_DIR (repo root)
+        # PARENT_DIR should be defined at the top of the script
+        prompt_file_path = os.path.join(PARENT_DIR, "verifiers", "prompt.txt") 
+        print(f"--- DEBUG: Attempting to load Gemini prompt from file: {prompt_file_path} ---")
+        if os.path.exists(prompt_file_path):
+            try:
+                with open(prompt_file_path, 'r') as f:
+                    loaded_gemini_prompt = f.read().strip()
+                print(f"--- DEBUG: Successfully loaded Gemini prompt from {prompt_file_path} ---")
+            except Exception as e_prompt_load:
+                print(f"--- WARNING: Failed to read prompt file {prompt_file_path}: {e_prompt_load} ---")
+        else:
+            print(f"--- WARNING: Prompt file not found at {prompt_file_path}. Gemini Verifier might not have a prompt unless configured otherwise. ---")
 
+    if args.max_candidates > 0:
+        print(f"--- DEBUG: max_candidates={args.max_candidates}, attempting to set up Gemini Verifier. ---")
+        # Ensure verifiers.gemini_verifier is importable
+        try:
+            from verifiers.gemini_verifier import GeminiVerifier # Ensure this path is correct
+            print("--- DEBUG: Successfully imported GeminiVerifier class from verifiers.gemini_verifier ---")
+
+            # Option 1: Try to instantiate from config specified by args.gemini_verifier
+            try:
+                print(f"--- DEBUG: Attempting to instantiate Gemini Verifier using config from --gemini_verifier arg: {args.gemini_verifier} ---")
+                verifier_conf_from_arg = OmegaConf.load(args.gemini_verifier) 
+                gemini_verifier_instance = instantiate_from_config(verifier_conf_from_arg)
+                print("--- DEBUG: Successfully instantiated Gemini Verifier from --gemini_verifier config file. ---")
+            except Exception as e_gv_load_arg:
+                print(f"--- DEBUG: Failed to load/instantiate Gemini Verifier from --gemini_verifier arg ('{args.gemini_verifier}'): {e_gv_load_arg}. ---")
+                print("--- DEBUG: Falling back to direct GeminiVerifier instantiation with loaded/default prompt. ---")
+                if loaded_gemini_prompt:
+                    try:
+                        gemini_verifier_instance = GeminiVerifier(gemini_prompt=loaded_gemini_prompt)
+                        print("--- DEBUG: Successfully instantiated GeminiVerifier directly with prompt from file/default. ---")
+                    except Exception as e_direct_init:
+                        print(f"--- ERROR: Failed to directly instantiate GeminiVerifier with prompt: {e_direct_init} ---")
+                        traceback.print_exc()
+                else:
+                    print("--- WARNING: No prompt loaded from file and --gemini_verifier config failed. Gemini Verifier not instantiated. ---")
+            
+            # Option 2: Check if a Gemini verifier config is in the main config (less likely if args.gemini_verifier is required)
+            # This part of the original logic is kept for completeness but might be redundant if args.gemini_verifier is always primary
+            if not gemini_verifier_instance and hasattr(config, 'gemini_verifier'): 
+                print("--- DEBUG: --gemini_verifier arg failed or not primary, trying instantiation from main config block 'gemini_verifier' ---")
+                try:
+                    gemini_verifier_instance = instantiate_from_config(config.gemini_verifier)
+                    print("--- DEBUG: Successfully instantiated Gemini Verifier from main config block. ---")
+                except Exception as e_main_conf_gv:
+                    print(f"--- DEBUG: Failed to instantiate Gemini Verifier from main config block: {e_main_conf_gv} ---")
+
+            # Final check and setup if instance is ready
             if gemini_verifier_instance:
-                print("--- DEBUG: Gemini Verifier instantiated successfully. ---")
-                # Validate min_candidates against max_candidates for Gemini run
+                print("--- DEBUG: Gemini Verifier is instantiated. Gemini pass will be active. ---")
                 if args.min_candidates <= 0: args.min_candidates = 1
                 if args.min_candidates > args.max_candidates:
                     print(f"  WARNING: min_candidates ({args.min_candidates}) > max_candidates ({args.max_candidates}). Setting min_candidates to {args.max_candidates}.")
                     args.min_candidates = args.max_candidates
                 gemini_active_for_run = True
             else:
-                print("--- WARNING: Gemini Verifier could not be instantiated. Gemini pass disabled. ---")
-        except Exception as e:
-            print(f"--- ERROR: Failed to instantiate Gemini Verifier: {e}. Gemini pass disabled. ---")
+                print("--- WARNING: Gemini Verifier could not be instantiated after all attempts. Gemini pass disabled. ---")
+
+        except ImportError as e_import_gv:
+            print(f"--- ERROR: Failed to import GeminiVerifier class from verifiers.gemini_verifier: {e_import_gv}. Gemini pass disabled. ---")
+            traceback.print_exc()
+        except Exception as e_setup_gv:
+            print(f"--- ERROR: General error during Gemini Verifier setup: {e_setup_gv}. Gemini pass disabled. ---")
             traceback.print_exc()
     else:
         print("--- DEBUG: max_candidates is 0, Gemini pass will be disabled. ---")
 
-    rembg_session = rembg.load_from_file(args.rembg_session) if args.rembg_session else None # This seems fine
-    infer_config = config.infer_config # This seems fine
+    rembg_session = rembg.load_from_file(args.rembg_session) if args.rembg_session and os.path.exists(args.rembg_session) else None
+    infer_config = config.infer_config
 
     print("--- DEBUG: About to create device and pipeline. ---")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
