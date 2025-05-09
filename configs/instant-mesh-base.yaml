@@ -1,4 +1,7 @@
-model_config:
+model_path: "sudo-ai/zero123plus-v1.2"  
+
+
+model:
   target: src.models.lrm_mesh.InstantMesh
   params:
     encoder_feat_dim: 768

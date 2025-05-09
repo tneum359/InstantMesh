@@ -610,7 +610,11 @@ if __name__ == "__main__":
 
     print("--- DEBUG: About to create device and pipeline. ---")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    pipeline = DiffusionPipeline.from_pretrained(model_config.model_path)
+    pipeline = DiffusionPipeline.from_pretrained(
+        model_config.model_path,
+        custom_pipeline="sudo-ai/zero123plus-pipeline",
+        torch_dtype=torch.float16
+    )
     pipeline.to(device)
     model = instantiate_from_config(model_config.model)
     model.to(device)
