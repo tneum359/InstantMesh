@@ -133,8 +133,8 @@ def process_image(args, config, model_config, infer_config, device,
                     os.unlink(item_path)
                 elif os.path.isdir(item_path):
                     shutil.rmtree(item_path)
-    except Exception as e:
-                print(f'  Warning: Failed to delete {item_path}. Reason: {e}')
+            except Exception as e:
+                        print(f'  Warning: Failed to delete {item_path}. Reason: {e}')
     elif not os.path.exists(intermediate_dir):
          os.makedirs(intermediate_dir, exist_ok=True) # Should already exist but defensive
 
@@ -329,8 +329,8 @@ def process_image(args, config, model_config, infer_config, device,
                 processed_grid_path = os.path.join(intermediate_dir, f'best_multiview_grid_processed_seed_{best_group_seed}.png')
                 processed_grid_pil.save(processed_grid_path)
                 print(f"  Saved best candidate processed grid to {processed_grid_path}")
-    except Exception as e:
-            print(f"  Warning: Failed to create or save processed grid for best candidate: {e}")
+        except Exception as e:
+                print(f"  Warning: Failed to create or save processed grid for best candidate: {e}")
     
     # Save the RAW grid from the diffusion model for the best candidate (optional)
     if best_group_pil_grid_raw:
@@ -371,11 +371,11 @@ def process_image(args, config, model_config, infer_config, device,
         # Ensure model and cameras are on the correct device
         planes = model.to(device).forward_planes(images, current_input_cameras)
         print("  Extracting mesh...")
-            mesh_out = model.extract_mesh(
-                planes,
-                use_texture_map=args.export_texmap,
-                **infer_config,
-            )
+        mesh_out = model.extract_mesh(
+            planes,
+            use_texture_map=args.export_texmap,
+            **infer_config,
+        )
         print(f"  Saving mesh to {output_obj_path} (temp name)... ")
         if args.export_texmap:
             # Check if mesh_out has the expected components
@@ -413,17 +413,17 @@ def process_image(args, config, model_config, infer_config, device,
             if len(mesh_out) == 3:
                 vertices, faces, vertex_colors = mesh_out
                  # --- Use Safe Conversion Function --- 
-                 verts_np = safe_to_numpy(vertices)
-                 faces_np = safe_to_numpy(faces)
-                 
-                 if verts_np is None or faces_np is None:
-                      print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
-                 else:
-                     colors_np = safe_to_numpy(vertex_colors)
-                     if colors_np is None:
-                         print(f"  Warning: Failed to convert vertex_colors to NumPy. Using fallback gray.")
-                         colors_np = np.ones_like(verts_np) * 0.5
-                     save_obj(verts_np, faces_np, colors_np, output_obj_path)
+                verts_np = safe_to_numpy(vertices)
+                faces_np = safe_to_numpy(faces)
+                
+                if verts_np is None or faces_np is None:
+                    print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
+                else:
+                    colors_np = safe_to_numpy(vertex_colors)
+                    if colors_np is None:
+                        print(f"  Warning: Failed to convert vertex_colors to NumPy. Using fallback gray.")
+                        colors_np = np.ones_like(verts_np) * 0.5
+                    save_obj(verts_np, faces_np, colors_np, output_obj_path)
             else:
                  print("  Warning: Vertex colors expected but mesh output format unexpected. Saving without colors.")
                  # Handle cases where only vertices and faces might be returned
