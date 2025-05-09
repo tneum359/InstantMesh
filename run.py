@@ -1,52 +1,94 @@
-import os
 import sys
-import argparse
-import numpy as np
-import torch
-import rembg
-from PIL import Image
-from torchvision.transforms import v2
-import torchvision.transforms.functional as F
-from pytorch_lightning import seed_everything
-from omegaconf import OmegaConf
-from einops import rearrange
-from tqdm import tqdm
-from glob import glob
-from huggingface_hub import hf_hub_download
-from diffusers import DiffusionPipeline, EulerAncestralDiscreteScheduler
-from torchvision.utils import make_grid
-import json
+import os
 import random
+import shutil
+import glob
+import argparse
 import traceback
-import subprocess # Import subprocess
-import base64
+import json
 from io import BytesIO
-import shutil # Added for rmtree
+import base64
+
+import torch
+import numpy as np
+from PIL import Image
+from tqdm import tqdm
+from omegaconf import OmegaConf
 
 # --- Add parent directory to sys.path ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(SCRIPT_DIR)
+print(f"--- DEBUG: Current SCRIPT_DIR: {SCRIPT_DIR}")
+print(f"--- DEBUG: Current PARENT_DIR: {PARENT_DIR}")
 sys.path.append(PARENT_DIR)
 print(f"--- DEBUG: Added {PARENT_DIR} to sys.path ---")
+print(f"--- DEBUG: Current sys.path: {sys.path}")
 
-# --- Local utils ---
-from src.utils.train_util import instantiate_from_config
-from src.utils.camera_util import (
-    FOV_to_intrinsics, 
-    get_zero123plus_input_cameras,
-    get_circular_camera_poses,
-)
-from src.utils.mesh_util import save_obj, save_obj_with_mtl
-from src.utils.infer_util import remove_background, resize_foreground
+print("--- DEBUG: Top-level imports seem OK. Proceeding to import specific components...")
 
-# --- Helper: Composite RGBA over white ---
+print("--- DEBUG: Attempting to import torchvision.transforms.v2 as F (or fallback) ---")
+try:
+    import torchvision.transforms.v2 as F
+    print("--- DEBUG: Successfully imported torchvision.transforms.v2 as F ---")
+except ImportError:
+    print("--- DEBUG: Failed to import torchvision.transforms.v2, trying torchvision.transforms as TF (aliased to F) ---")
+    import torchvision.transforms as F # Alias TF to F for consistency if v2 not available
+    print("--- DEBUG: Successfully imported torchvision.transforms as TF (aliased to F) ---")
+
+print("--- DEBUG: Attempting to import torchvision.utils.make_grid ---")
+from torchvision.utils import make_grid
+print("--- DEBUG: Successfully imported torchvision.utils.make_grid ---")
+
+print("--- DEBUG: Attempting to import Diffusers components ---")
+from diffusers import DiffusionPipeline, EulerAncestralDiscreteScheduler
+from diffusers.utils import export_to_video # Though export_to_video might not be used in this specific script version
+print("--- DEBUG: Successfully imported Diffusers components ---")
+
+print("--- DEBUG: Attempting to import rembg ---")
+import rembg
+print("--- DEBUG: Successfully imported rembg ---")
+
+print("--- DEBUG: Attempting to import hf_hub_download ---")
+from huggingface_hub import hf_hub_download
+print("--- DEBUG: Successfully imported hf_hub_download ---")
+
+# --- Try Local Imports (utils, etc.) ---
+print("--- DEBUG: About to try local imports from src.utils (submodule) ---")
+try:
+    from src.utils.config import instantiate_from_config
+    print("--- DEBUG: Successfully imported instantiate_from_config from src.utils.config ---")
+    from src.utils.train_utils import seed_everything
+    print("--- DEBUG: Successfully imported seed_everything from src.utils.train_utils ---")
+    from src.utils.mesh_utils import save_obj, save_obj_with_mtl
+    print("--- DEBUG: Successfully imported mesh_utils (save_obj, save_obj_with_mtl) ---")
+except ImportError as e:
+    print(f"--- CRITICAL DEBUG: Error importing from src.utils: {e} ---")
+    print("--- CRITICAL DEBUG: This likely means that the main InstantMesh submodule or its utils are not correctly in sys.path or are missing. ---")
+    print(f"--- CRITICAL DEBUG: Check if 'InstantMesh/src/' exists and contains __init__.py files and the required modules (config.py, train_utils.py, mesh_utils.py). ---")
+    # exit(1) # Consider exiting if these are absolutely essential before argparse
+
+print("--- DEBUG: All known imports at the top level seem to have been attempted. ---")
+print('--- DEBUG: Reaching helper function definitions and then \'if __name__ == "__main__":\' block. ---')
+
+# Placeholder for removed functions if they were here globally
+# (e.g., remove_background, get_zero123plus_input_cameras were moved or handled differently)
+
+# Helper function from the original context (make sure it's defined or imported)
+# This was defined globally in the script I had context for.
+print("--- DEBUG: Defining helper function rgba_to_rgb_white ---")
 def rgba_to_rgb_white(img):
+    # Assuming img is a PIL Image in RGBA format
     if img.mode == 'RGBA':
-        background = Image.new('RGB', img.size, (255, 255, 255))
-        # Alpha composite needs both images to be RGBA
-        return Image.alpha_composite(background.convert('RGBA'), img).convert('RGB') 
-    else:
-        return img.convert('RGB')
+        # Create a new white background image
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        # Paste the RGBA image onto the white background using the alpha channel as a mask
+        bg.paste(img, mask=img.split()[3]) 
+        return bg
+    elif img.mode == 'RGB':
+        return img # Already RGB
+    else: # For other modes, convert to RGB (e.g. L, P)
+        return img.convert("RGB")
+print("--- DEBUG: Defined helper function rgba_to_rgb_white ---")
 
 # --- Helper: Camera function (assuming it's needed globally or passed) ---
 def get_render_cameras(batch_size=1, M=120, radius=4.0, elevation=20.0, is_flexicubes=False):
@@ -425,21 +467,7 @@ def process_image(args, config, model_config, infer_config, device,
                         colors_np = np.ones_like(verts_np) * 0.5
                     save_obj(verts_np, faces_np, colors_np, output_obj_path)
             else:
-                 print("  Warning: Vertex colors expected but mesh output format unexpected. Saving without colors.")
-                 # Handle cases where only vertices and faces might be returned
-                 if len(mesh_out) == 2:
-                      vertices, faces = mesh_out
-                      # --- Use Safe Conversion Function --- 
-                      verts_np = safe_to_numpy(vertices)
-                      faces_np = safe_to_numpy(faces)
-                      
-                      if verts_np is None or faces_np is None:
-                           print(f"  Error: Failed to convert vertices or faces to NumPy. Cannot save OBJ.")
-                      else:
-                          dummy_colors = np.ones_like(verts_np) * 0.5 # Gray
-                          save_obj(verts_np, faces_np, dummy_colors, output_obj_path)
-                 else:
-                      print(f"  Error: Unexpected number of items ({len(mesh_out)}) returned by extract_mesh. Cannot save OBJ.")
+                 print(f"  Warning: Mesh file {output_obj_path} not found after saving.")
 
         
         # --- Rename the saved OBJ ---
@@ -455,3 +483,44 @@ def process_image(args, config, model_config, infer_config, device,
                   print(f"  Error renaming {output_obj_path} to {final_output_obj_path}: {e}")
         else:
              print(f"  Warning: Mesh file {output_obj_path} not found after saving.")
+
+print('--- DEBUG: Script definitions complete. Reaching \'if __name__ == "__main__":\' block. ---')
+
+if __name__ == "__main__":
+    print('--- DEBUG: Entered \'if __name__ == "__main__":\' block. ---')
+    print("--- DEBUG: About to create ArgumentParser. ---")
+    parser = argparse.ArgumentParser()
+    print("--- DEBUG: ArgumentParser created. Defining arguments. ---")
+    parser.add_argument("--config", type=str, required=True, help="Path to the config file")
+    parser.add_argument("--model", type=str, required=True, help="Path to the model file")
+    parser.add_argument("--gemini_verifier", type=str, required=True, help="Path to the Gemini verifier file")
+    parser.add_argument("--rembg_session", type=str, help="Path to the rembg session file")
+    parser.add_argument("--scale", type=float, default=1.0, help="Scale factor for camera positions")
+    parser.add_argument("--view", type=int, default=6, help="Number of views to reconstruct")
+    parser.add_argument("--diffusion_steps", type=int, default=50, help="Number of diffusion steps")
+    parser.add_argument("--gen_width", type=int, default=512, help="Width of generated images")
+    parser.add_argument("--gen_height", type=int, default=512, help="Height of generated images")
+    parser.add_argument("--min_candidates", type=int, default=1, help="Minimum number of candidates to consider")
+    parser.add_argument("--max_candidates", type=int, default=10, help="Maximum number of candidates to consider")
+    parser.add_argument("--target_score", type=float, default=0.8, help="Target score for Gemini pass")
+    parser.add_argument("--export_texmap", action="store_true", help="Export texture map")
+    parser.add_argument("--no_rembg", action="store_true", help="Skip background removal")
+    args = parser.parse_args()
+
+    print("--- DEBUG: About to load config and model. ---")
+    config = OmegaConf.load(args.config)
+    model_config = OmegaConf.load(args.model)
+    gemini_verifier = instantiate_from_config(config.gemini_verifier)
+    rembg_session = rembg.load_from_file(args.rembg_session) if args.rembg_session else None
+    infer_config = config.infer_config
+
+    print("--- DEBUG: About to create device and pipeline. ---")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    pipeline = DiffusionPipeline.from_pretrained(model_config.model_path)
+    pipeline.to(device)
+    model = instantiate_from_config(model_config.model)
+    model.to(device)
+
+    print("--- DEBUG: About to process images. ---")
+    for input_image_path in glob(config.data.image_paths):
+        process_image(args, config, model_config, infer_config, device, pipeline, model, gemini_verifier, rembg_session, None, input_image_path, config.data.intermediate_dir, config.data.output_dir, False)
